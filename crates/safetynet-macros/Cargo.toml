@@ -1,0 +1,18 @@
+[package]
+name = "safetynet-macros"
+description = "Proc-macros for safetynet: #[safetynet], #[derive(VmLayout)], sn_asm!."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lib]
+# Compiler plugin: this crate and its dependencies are never linked into the
+# target binary, which is what keeps the assembler out of the shipped artifact.
+proc-macro = true
+
+[dependencies]
+
+[lints]
+workspace = true

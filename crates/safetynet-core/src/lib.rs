@@ -1,14 +1,29 @@
-pub fn add(left: u64, right: u64) -> u64 {
-    left + right
-}
+//! Shared logic for safetynet: the byte-order policy, and in time the opcode
+//! table, IR, assembler and interpreter.
+//!
+//! Proc-macro crates may only export macros, so everything reusable lives here
+//! and both `safetynet-macros` and the runtime depend on it. That is what keeps
+//! the encoder and the decoder from drifting: they are declared together, once.
+
+pub mod byte_order;
+
+pub use byte_order::{Be, ByteOrder, Le};
+
+/// The VM's machine word: one `u64`, wrapping, monomorphic.
+pub type Word = u64;
+
+/// Size of one [`Word`] in bytes: the granularity of every push and pop.
+pub const WORD_SIZE: usize = core::mem::size_of::<Word>();
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn it_works() {
-        let result = add(2, 2);
-        assert_eq!(result, 4);
+    fn word_is_eight_bytes() {
+        // The frame layout rounds to this, the operand stack steps by it, and
+        // `LDS`/`STS` displacements are expressed against it. If it ever
+        // changes, a great deal of arithmetic elsewhere changes with it.
+        assert_eq!(WORD_SIZE, 8);
     }
 }

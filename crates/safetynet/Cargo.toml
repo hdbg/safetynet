@@ -1,6 +1,6 @@
 [package]
-name = "safetynet-core"
-description = "Shared IR, byte-order policy, assembler and interpreter for safetynet."
+name = "safetynet"
+description = "A Rust-embedded bytecode VM for CTF reversing challenges."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -8,6 +8,7 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
+safetynet-core.workspace = true
 
 [lints]
 workspace = true
