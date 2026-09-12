@@ -112,10 +112,10 @@ spelling of `FREE 8` common enough to earn one.
 implementors:
 
 ```rust
-pub trait ByteOrder: sealed::Sealed + Copy + 'static {
-    const NAME: &'static str;                          // "le" / "be" — diagnostics only
-    fn read_u32(b: [u8; 4]) -> u32;   fn write_u32(v: u32, out: &mut [u8; 4]);
-    fn read_u64(b: [u8; 8]) -> u64;   fn write_u64(v: u64, out: &mut [u8; 8]);
+pub trait ByteOrder: sealed::Sealed + Copy + Clone + Debug + 'static {
+    const NAME: &'static str;                      // "le" / "be" — diagnostics only
+    fn read_u32(bytes: [u8; 4]) -> u32;    fn write_u32(value: u32) -> [u8; 4];
+    fn read_u64(bytes: [u8; 8]) -> u64;    fn write_u64(value: u64) -> [u8; 8];
 }
 pub struct Le;
 pub struct Be;
@@ -123,10 +123,22 @@ pub struct Be;
 
 Everything that touches bytes is generic over `B` and monomorphized: no runtime
 branch, no `ByteOrder` value in the binary, just the one order's shift/or
-sequence inlined at each site. The order is selected once per build —
-`safetynet::Order` is a type alias resolved by the mutually exclusive cargo
-features `order-le` (default) and `order-be` — and overridable per function with
-`#[safetynet(order = Be)]` and per program with `sn_asm!(Be { … })`.
+sequence inlined at each site.
+
+**The order is named literally at the source, never by cargo feature.** `Le` is
+the compiled-in default; anything else is written at the site —
+`#[safetynet(order = Be)]`, `sn_asm!(Be { … })`. `safetynet::Order` exists as an
+alias for the default so signatures can spell it, but it is documentation, not
+configuration: the macro bakes `.rodata` bytes at expansion time and therefore
+needs a *concrete* order in hand, so it resolves the default itself rather than
+deferring to a type alias that only const-eval would see.
+
+Features were considered and rejected. A proc-macro cannot read the features of
+another crate at all, and can read its own only if the façade forwards them
+deliberately; even done correctly, cargo features are global and additive, so two
+crates in one build graph could not choose different orders — the knob would be
+per-*graph*, which is not what "per program" means. A literal at the call site is
+both more honest and more local.
 
 Because a single type parameter is threaded from the `#[safetynet]` expansion
 through the image builder, the interpreter, every frame cell and both marshal
@@ -698,8 +710,10 @@ Four oracles, each catching what the others structurally cannot:
   what keeps the asm surface from lagging the IR now that the lowerer does not
   travel through it.
 
-Every suite runs under both `Le` and `Be` — an order that is never exercised is
-an order that rots. One targeted property belongs here specifically because of
+Every suite runs under both `Le` and `Be`. Since the order is a literal and not a
+build flag (§3.2), that is *test parameterization*, not a CI matrix: tests are
+generic over `B` and instantiated for each order, so one `cargo test` covers
+both and neither can rot unnoticed. One targeted property belongs here specifically because of
 SP-relative locals: take any program, insert a balanced junk push/drop pair at a
 random point, and the re-finalized program must produce identical results with
 different displacements. That is the cheap test for the whole displacement
@@ -734,9 +748,12 @@ readable before/after diff to assert on.
 
 Each phase ends runnable and tested; the two harnesses grow continuously.
 
-- **Phase 0 — Workspace.** Three crates; encoding in core; `ByteOrder` with `Le`/
-  `Be` and the mutually exclusive `order-le`/`order-be` features; release profile
-  (`lto`, `panic="abort"`, `strip`, `opt-level`) pinned.
+- **Phase 0 — Workspace.** Virtual root over `crates/*`: `safetynet-core`,
+  `safetynet-macros`, the `safetynet` façade, and `safetynet-demo` (the binary
+  Phase 8's CI strips and greps). `ByteOrder`/`Le`/`Be` and `Word` in core, with
+  both orders exercised by parameterized tests; `missing_docs` denied
+  workspace-wide; release profile (`lto`, `panic="abort"`, `strip`, `opt-level`)
+  pinned.
 - **Phase 1 — ISA + interpreter.** The `define_ops!` table — one declaration per
   opcode generating struct, `impl Op` (`sp_delta`, `encode`, `decode`, `exec`),
   `Instr` and the mnemonic table — plus `Vm<B>` with byte stack, `SP`, frames
@@ -985,9 +1002,9 @@ loudly.
 - **Endianness** *(addressed)* is now a compile-time type parameter (§3) threaded
   through `Vm<B>`, the image builder and `marshal<B>`/`unmarshal<B>`, so agreement
   is enforced by the type checker rather than by a code comment. What the type
-  system cannot enforce is coverage: CI must run the differential, golden and
-  round-trip suites under both `Le` and `Be`, or the unselected order silently
-  rots and `order-be` becomes a build that has never been tested.
+  system cannot enforce is coverage: the differential, golden and round-trip
+  suites must each be instantiated for both `Le` and `Be` (§13), or the order
+  nobody builds becomes the order nobody has ever tested.
 - **No encode/decode round-trip test** *(addressed)*. The throwaway hand-assembler
   is deleted after Phase 1, which originally left no property that
   `decode(encode(x)) == x`; a symmetric encoder/decoder bug would pass the
