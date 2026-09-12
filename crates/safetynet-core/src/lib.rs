@@ -6,8 +6,10 @@
 //! the encoder and the decoder from drifting: they are declared together, once.
 
 pub mod byte_order;
+pub mod isa;
 
 pub use byte_order::{Be, ByteOrder, Le};
+pub use isa::{FrameSize, Instr, Op};
 
 /// The VM's machine word: one `u64`, wrapping, monomorphic.
 pub type Word = u64;

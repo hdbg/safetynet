@@ -30,6 +30,12 @@ pub trait ByteOrder: sealed::Sealed + Copy + Clone + core::fmt::Debug + 'static 
     /// Short lowercase name (`"le"` / `"be"`).
     const NAME: &'static str;
 
+    /// Decodes two image bytes into a `u16`.
+    fn read_u16(bytes: [u8; 2]) -> u16;
+
+    /// Encodes a `u16` into two image bytes.
+    fn write_u16(value: u16) -> [u8; 2];
+
     /// Decodes four image bytes into a `u32`.
     fn read_u32(bytes: [u8; 4]) -> u32;
 
@@ -55,6 +61,14 @@ impl ByteOrder for Le {
     const BIG_ENDIAN: bool = false;
     const NAME: &'static str = "le";
 
+    fn read_u16(bytes: [u8; 2]) -> u16 {
+        u16::from_le_bytes(bytes)
+    }
+
+    fn write_u16(value: u16) -> [u8; 2] {
+        value.to_le_bytes()
+    }
+
     fn read_u32(bytes: [u8; 4]) -> u32 {
         u32::from_le_bytes(bytes)
     }
@@ -75,6 +89,14 @@ impl ByteOrder for Le {
 impl ByteOrder for Be {
     const BIG_ENDIAN: bool = true;
     const NAME: &'static str = "be";
+
+    fn read_u16(bytes: [u8; 2]) -> u16 {
+        u16::from_be_bytes(bytes)
+    }
+
+    fn write_u16(value: u16) -> [u8; 2] {
+        value.to_be_bytes()
+    }
 
     fn read_u32(bytes: [u8; 4]) -> u32 {
         u32::from_be_bytes(bytes)
@@ -109,6 +131,9 @@ mod tests {
         for value in [0u32, 1, 0xff, 0x0102_0304, u32::MAX] {
             assert_eq!(B::read_u32(B::write_u32(value)), value, "u32 {value:#x}");
         }
+        for value in [0u16, 1, 0xff, 0x0102, u16::MAX] {
+            assert_eq!(B::read_u16(B::write_u16(value)), value, "u16 {value:#x}");
+        }
     }
 
     #[test]
@@ -125,6 +150,8 @@ mod tests {
     #[test]
     fn orders_disagree_on_multibyte_values() {
         assert_ne!(Le::write_u32(0x1234_5678), Be::write_u32(0x1234_5678));
+        assert_eq!(Le::write_u16(0x1234), [0x34, 0x12]);
+        assert_eq!(Be::write_u16(0x1234), [0x12, 0x34]);
         assert_eq!(Le::write_u32(0x1234_5678), [0x78, 0x56, 0x34, 0x12]);
         assert_eq!(Be::write_u32(0x1234_5678), [0x12, 0x34, 0x56, 0x78]);
         assert_eq!(
