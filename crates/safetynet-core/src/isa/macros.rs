@@ -36,21 +36,34 @@ macro_rules! define_op_struct {
 /// ```text
 /// /// Documentation for the instruction.
 /// Push32 { /// Documentation for the operand.
-///          imm: u32 } = "push32", sp(|_| WORD);
+///          imm: u32 }
+///     = "push32", sp(|_| WORD), exec(|vm, op| vm.push_imm(op.imm.into()));
 /// ```
 ///
-/// The `sp(..)` argument is a closure rather than a bare expression because a
-/// `macro_rules!` body cannot refer to the `self` of a method it generates:
+/// `sp(..)` and `exec(..)` *look* like closures but are not: the `|..|` heads
+/// bind names for the operand struct and the machine, and the body is spliced
+/// straight into the generated method. They are written this way because a
+/// `macro_rules!` body cannot refer to the `self` of a method it generates —
 /// `self` is hygienic, and one written in the table would not resolve to the one
-/// in `sp_delta`. Taking the operand struct as a closure parameter sidesteps
-/// that, and is also what lets `ALLOC`'s effect depend on its own operand, which
-/// a constant could not express.
+/// in `sp_delta` or `exec`. Naming the operand at the table sidesteps that, and
+/// is what lets `ALLOC`'s stack effect depend on its own operand, which a
+/// constant could not express.
+///
+/// Since the bodies are spliced in rather than called, an `exec` body may also
+/// name the byte order `B` even though nothing in the table declares it: generic
+/// parameters are not hygienic, unlike `self`.
+///
+/// Declaring behaviour beside the stack effect is the point of the table. An op
+/// that forgets either one does not compile, where a central table keyed by
+/// opcode number would simply have a missing entry.
 macro_rules! define_ops {
     ($(
         $(#[$meta:meta])*
         $name:ident
             $({ $($(#[$fmeta:meta])* $field:ident : $fty:ty),* $(,)? })?
-            = $mnemonic:literal, sp($sp:expr);
+            = $mnemonic:literal,
+              sp(|$sp_op:pat_param| $sp:expr),
+              exec(|$vm:pat_param, $exec_op:pat_param| $exec:expr);
     )*) => {
         $( define_op_struct!($(#[$meta])* $name $({ $($(#[$fmeta])* $field: $fty),* })?); )*
 
@@ -59,8 +72,14 @@ macro_rules! define_ops {
                 const MNEMONIC: &'static str = $mnemonic;
 
                 fn sp_delta(&self) -> i32 {
-                    #[allow(clippy::redundant_closure_call)]
-                    ($sp)(self)
+                    let $sp_op: &Self = self;
+                    $sp
+                }
+
+                fn exec<B: ByteOrder>(&self, vm: &mut Vm<B>) -> Result<Flow, Trap> {
+                    let $vm: &mut Vm<B> = vm;
+                    let $exec_op: &Self = self;
+                    $exec
                 }
             }
 
@@ -94,6 +113,11 @@ macro_rules! define_ops {
             /// ultimately computed from.
             pub fn sp_delta(self) -> i32 {
                 match self { $( Self::$name(op) => op.sp_delta(), )* }
+            }
+
+            /// Executes this instruction on `vm`.
+            pub fn exec<B: ByteOrder>(self, vm: &mut Vm<B>) -> Result<Flow, Trap> {
+                match self { $( Self::$name(op) => op.exec(vm), )* }
             }
         }
     };

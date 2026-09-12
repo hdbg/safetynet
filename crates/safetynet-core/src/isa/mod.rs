@@ -34,7 +34,8 @@ use musli::alloc::Global;
 use musli::mode::Binary;
 use musli::{Decode, Encode};
 
-use crate::WORD_SIZE;
+use crate::vm::{Flow, Trap, Vm, Width, div, rem, sdiv, srem};
+use crate::{ByteOrder, WORD_SIZE, Word};
 use macros::{define_op_struct, define_ops};
 
 pub use frame_size::FrameSize;
@@ -42,8 +43,8 @@ pub use frame_size::FrameSize;
 /// Stack effect of one word, as a signed byte count.
 const WORD: i32 = WORD_SIZE as i32;
 
-/// One operation: what it is called, what it does to `SP`, and how its operands
-/// travel.
+/// One operation: what it is called, what it does to `SP`, and what it does when
+/// it runs.
 pub trait Op:
     Copy
     + core::fmt::Debug
@@ -60,63 +61,70 @@ pub trait Op:
     ///
     /// Takes `&self` because `ALLOC`/`FREE`'s effect *is* their operand.
     fn sp_delta(&self) -> i32;
+
+    /// Runs the operation and reports where control goes next.
+    ///
+    /// Moving `SP` is the operation's own business; [`sp_delta`](Op::sp_delta)
+    /// is the compile-time prediction of what this does, and the two agreeing is
+    /// what every frame displacement rests on.
+    fn exec<B: ByteOrder>(&self, vm: &mut Vm<B>) -> Result<Flow, Trap>;
 }
 
 define_ops! {
     /// Stops the machine. The return value, if any, is already in `.ret`.
-    Halt = "halt", sp(|_| 0);
+    Halt = "halt", sp(|_| 0), exec(|_, _| Ok(Flow::Halt));
 
     /// Pushes a byte constant, zero-extended to a word.
     Push8 {
         /// The constant.
         imm: u8
-    } = "push8", sp(|_| WORD);
+    } = "push8", sp(|_| WORD), exec(|vm, op| vm.push_imm(op.imm.into()));
 
     /// Pushes a 32-bit constant, zero-extended to a word.
     Push32 {
         /// The constant.
         imm: u32
-    } = "push32", sp(|_| WORD);
+    } = "push32", sp(|_| WORD), exec(|vm, op| vm.push_imm(op.imm.into()));
 
     /// Pushes a full-width constant.
     Push64 {
         /// The constant.
         imm: u64
-    } = "push64", sp(|_| WORD);
+    } = "push64", sp(|_| WORD), exec(|vm, op| vm.push_imm(op.imm));
 
     /// Discards the top word. Spelled separately from `FREE 8` because it is by
     /// far the most common way to shrink the stack.
-    Drop = "drop", sp(|_| -WORD);
+    Drop = "drop", sp(|_| -WORD), exec(|vm, _| vm.drop_word());
 
     /// Reserves the frame in the prologue.
     Alloc {
         /// Frame size in bytes; word-aligned by construction.
         n: FrameSize
-    } = "alloc", sp(|op: &Alloc| i32::from(op.n.bytes()));
+    } = "alloc", sp(|op| i32::from(op.n.bytes())), exec(|vm, op| vm.alloc(op.n));
 
     /// Releases the frame in the epilogue.
     Free {
         /// Bytes to release; word-aligned by construction.
         n: FrameSize
-    } = "free", sp(|op: &Free| -i32::from(op.n.bytes()));
+    } = "free", sp(|op| -i32::from(op.n.bytes())), exec(|vm, op| vm.free(op.n));
 
     /// Pushes the byte at `SP - disp`, zero-extended to a word.
     Lds8 {
         /// Displacement back from `SP`.
         disp: u16
-    } = "lds8", sp(|_| WORD);
+    } = "lds8", sp(|_| WORD), exec(|vm, op| vm.load_frame(op.disp, Width::U8));
 
     /// Pushes the 32-bit value at `SP - disp`, zero-extended to a word.
     Lds32 {
         /// Displacement back from `SP`.
         disp: u16
-    } = "lds32", sp(|_| WORD);
+    } = "lds32", sp(|_| WORD), exec(|vm, op| vm.load_frame(op.disp, Width::U32));
 
     /// Pushes the word at `SP - disp`.
     Lds64 {
         /// Displacement back from `SP`.
         disp: u16
-    } = "lds64", sp(|_| WORD);
+    } = "lds64", sp(|_| WORD), exec(|vm, op| vm.load_frame(op.disp, Width::U64));
 
     /// Pops a word and stores its low byte at `SP - disp`.
     ///
@@ -125,101 +133,103 @@ define_ops! {
     Sts8 {
         /// Displacement back from `SP`, measured before the pop.
         disp: u16
-    } = "sts8", sp(|_| -WORD);
+    } = "sts8", sp(|_| -WORD), exec(|vm, op| vm.store_frame(op.disp, Width::U8));
 
     /// Pops a word and stores its low four bytes at `SP - disp`.
     Sts32 {
         /// Displacement back from `SP`, measured before the pop.
         disp: u16
-    } = "sts32", sp(|_| -WORD);
+    } = "sts32", sp(|_| -WORD), exec(|vm, op| vm.store_frame(op.disp, Width::U32));
 
     /// Pops a word and stores it at `SP - disp`.
     Sts64 {
         /// Displacement back from `SP`, measured before the pop.
         disp: u16
-    } = "sts64", sp(|_| -WORD);
+    } = "sts64", sp(|_| -WORD), exec(|vm, op| vm.store_frame(op.disp, Width::U64));
 
     /// Pops an address, pushes the byte there, zero-extended.
-    Ld8 = "ld8", sp(|_| 0);
+    Ld8 = "ld8", sp(|_| 0), exec(|vm, _| vm.load(Width::U8));
     /// Pops an address, pushes the 32-bit value there, zero-extended.
-    Ld32 = "ld32", sp(|_| 0);
+    Ld32 = "ld32", sp(|_| 0), exec(|vm, _| vm.load(Width::U32));
     /// Pops an address, pushes the word there.
-    Ld64 = "ld64", sp(|_| 0);
+    Ld64 = "ld64", sp(|_| 0), exec(|vm, _| vm.load(Width::U64));
     /// Pops a value then an address; stores the value's low byte.
-    St8 = "st8", sp(|_| -2 * WORD);
+    St8 = "st8", sp(|_| -2 * WORD), exec(|vm, _| vm.store(Width::U8));
     /// Pops a value then an address; stores the value's low four bytes.
-    St32 = "st32", sp(|_| -2 * WORD);
+    St32 = "st32", sp(|_| -2 * WORD), exec(|vm, _| vm.store(Width::U32));
     /// Pops a value then an address; stores the whole word.
-    St64 = "st64", sp(|_| -2 * WORD);
+    St64 = "st64", sp(|_| -2 * WORD), exec(|vm, _| vm.store(Width::U64));
 
     /// Wrapping addition.
-    Add = "add", sp(|_| -WORD);
+    Add = "add", sp(|_| -WORD), exec(|vm, _| vm.binary(Word::wrapping_add));
     /// Wrapping subtraction.
-    Sub = "sub", sp(|_| -WORD);
+    Sub = "sub", sp(|_| -WORD), exec(|vm, _| vm.binary(Word::wrapping_sub));
     /// Wrapping multiplication.
-    Mul = "mul", sp(|_| -WORD);
+    Mul = "mul", sp(|_| -WORD), exec(|vm, _| vm.binary(Word::wrapping_mul));
     /// Unsigned division; traps on a zero divisor.
-    Div = "div", sp(|_| -WORD);
+    Div = "div", sp(|_| -WORD), exec(|vm, _| vm.binary_checked(div));
     /// Unsigned remainder; traps on a zero divisor.
-    Rem = "rem", sp(|_| -WORD);
+    Rem = "rem", sp(|_| -WORD), exec(|vm, _| vm.binary_checked(rem));
     /// Signed division; traps on a zero divisor and on `i64::MIN / -1`.
-    SDiv = "sdiv", sp(|_| -WORD);
+    SDiv = "sdiv", sp(|_| -WORD), exec(|vm, _| vm.binary_checked(sdiv));
     /// Signed remainder; traps on a zero divisor and on `i64::MIN % -1`.
-    SRem = "srem", sp(|_| -WORD);
+    SRem = "srem", sp(|_| -WORD), exec(|vm, _| vm.binary_checked(srem));
 
     /// Bitwise and.
-    And = "and", sp(|_| -WORD);
+    And = "and", sp(|_| -WORD), exec(|vm, _| vm.binary(|a, b| a & b));
     /// Bitwise or.
-    Or = "or", sp(|_| -WORD);
+    Or = "or", sp(|_| -WORD), exec(|vm, _| vm.binary(|a, b| a | b));
     /// Bitwise exclusive or.
-    Xor = "xor", sp(|_| -WORD);
+    Xor = "xor", sp(|_| -WORD), exec(|vm, _| vm.binary(|a, b| a ^ b));
     /// Bitwise complement of the top word.
-    BitNot = "not", sp(|_| 0);
+    BitNot = "not", sp(|_| 0), exec(|vm, _| vm.unary(|a| !a));
     /// Shift left; the count is masked to six bits.
-    Shl = "shl", sp(|_| -WORD);
+    Shl = "shl", sp(|_| -WORD), exec(|vm, _| vm.binary(|a, b| a.wrapping_shl(b as u32)));
     /// Logical shift right; the count is masked to six bits.
-    Shr = "shr", sp(|_| -WORD);
+    Shr = "shr", sp(|_| -WORD), exec(|vm, _| vm.binary(|a, b| a.wrapping_shr(b as u32)));
     /// Arithmetic shift right; the count is masked to six bits.
-    Sar = "sar", sp(|_| -WORD);
+    Sar = "sar", sp(|_| -WORD),
+        exec(|vm, _| vm.binary(|a, b| (a as i64).wrapping_shr(b as u32) as Word));
 
     /// Equality; pushes 0 or 1.
-    CmpEq = "eq", sp(|_| -WORD);
+    CmpEq = "eq", sp(|_| -WORD), exec(|vm, _| vm.compare(|a, b| a == b));
     /// Unsigned less-than; pushes 0 or 1.
-    CmpLt = "lt", sp(|_| -WORD);
+    CmpLt = "lt", sp(|_| -WORD), exec(|vm, _| vm.compare(|a, b| a < b));
     /// Unsigned less-or-equal; pushes 0 or 1.
-    CmpLe = "le", sp(|_| -WORD);
+    CmpLe = "le", sp(|_| -WORD), exec(|vm, _| vm.compare(|a, b| a <= b));
     /// Signed less-than; pushes 0 or 1.
-    CmpSLt = "slt", sp(|_| -WORD);
+    CmpSLt = "slt", sp(|_| -WORD), exec(|vm, _| vm.compare(|a, b| (a as i64) < (b as i64)));
     /// Signed less-or-equal; pushes 0 or 1.
-    CmpSLe = "sle", sp(|_| -WORD);
+    CmpSLe = "sle", sp(|_| -WORD), exec(|vm, _| vm.compare(|a, b| (a as i64) <= (b as i64)));
 
     /// Unconditional relative jump.
     Jmp {
         /// Offset from the first byte of the following instruction.
         offset: i32
-    } = "jmp", sp(|_| 0);
+    } = "jmp", sp(|_| 0), exec(|_, op| Ok(Flow::Jump(op.offset)));
 
     /// Pops a word; jumps if it is zero.
     Jz {
         /// Offset from the first byte of the following instruction.
         offset: i32
-    } = "jz", sp(|_| -WORD);
+    } = "jz", sp(|_| -WORD), exec(|vm, op| vm.jump_if_zero(op.offset));
 
     /// Pops a word; jumps if it is non-zero.
     Jnz {
         /// Offset from the first byte of the following instruction.
         offset: i32
-    } = "jnz", sp(|_| -WORD);
+    } = "jnz", sp(|_| -WORD), exec(|vm, op| vm.jump_if_not_zero(op.offset));
 
     /// Jump table. **Reserved**: no operand format is fixed yet, and executing
     /// one traps.
-    Switch = "switch", sp(|_| -WORD);
+    Switch = "switch", sp(|_| -WORD),
+        exec(|_, _| Err(Trap::Reserved { mnemonic: Switch::MNEMONIC }));
 
     /// Host escape. **Reserved**: traps until there is a host table to index.
     Host {
         /// Index into the author-registered host function table.
         index: u8
-    } = "host", sp(|_| 0);
+    } = "host", sp(|_| 0), exec(|_, _| Err(Trap::Reserved { mnemonic: Host::MNEMONIC }));
 }
 
 #[cfg(test)]
