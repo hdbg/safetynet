@@ -152,17 +152,48 @@ security argument.
 
 ### 3.3 Instruction set
 
-- Arithmetic: `ADD SUB MUL DIV REM` (`DIV`/`REM` trap on zero divisor)
-- Bitwise: `AND OR XOR NOT SHL SHR`
-- Compare: `EQ LT LE` → 0/1 (the other three by operand swap / negation)
-- Frame: `ALLOC n`, `FREE n`, `LDS.w k`, `STS.w k` (`w` ∈ {u8, u32, u64}; `k` a
-  byte displacement from `SP`)
-- Stack: `PUSH imm` (one word), `DROP`
+- Arithmetic: `ADD SUB MUL DIV REM SDIV SREM`. `DIV`/`REM` are unsigned;
+  `SDIV`/`SREM` interpret both operands as `i64`. All four trap on a zero
+  divisor, and the signed pair additionally traps on `i64::MIN / -1`, the one
+  signed division with no representable result.
+- Bitwise: `AND OR XOR NOT SHL SHR SAR`. `SHR` is logical, `SAR` arithmetic. The
+  shift count is **masked to its low 6 bits**, so a shift by 64 is a shift by 0;
+  leaving that undefined is how a VM and its reference come to disagree on the
+  one input nobody tested.
+- Compare: `EQ LT LE SLT SLE` → a full word, 0 or 1. `LT`/`LE` are unsigned,
+  `SLT`/`SLE` signed; the remaining orderings come from operand swap.
+- Frame: `ALLOC n`, `FREE n`, `LDS8 LDS32 LDS64 k`, `STS8 STS32 STS64 k` (`k` a
+  byte displacement back from `SP`). Loads zero-extend to a word; stores write
+  the low bytes.
+- Stack: `PUSH8 PUSH32 PUSH64 imm` (zero-extended to a word), `DROP`
 - Memory: `LD8 LD32 LD64` / `ST8 ST32 ST64` at an absolute address popped from
   the stack; multi-byte accesses use the build's byte order `B`, `LD8`/`ST8` are
   order-independent
 - Control: `JMP`, `JZ`, `JNZ` (relative offsets), `SWITCH` (jump table)
 - `HOST k` (host escape, §7.4), `HALT`
+
+`SWITCH` and `HOST` have **reserved opcodes that trap on execution** until the
+subset needs them — `match` lowering and the host table respectively. Reserving
+the bytes now keeps opcode numbering stable across the phases that add them.
+
+**Encoding.** One byte of opcode, then the immediate if there is one, in the
+build's byte order `B`:
+
+| immediate | width | notes |
+|---|---|---|
+| `PUSH8` / `PUSH32` / `PUSH64` | 1 / 4 / 8 | zero-extended to a word |
+| `ALLOC` / `FREE` | `u16` | must be a multiple of 8; other values fail to decode |
+| `LDS*` / `STS*` | `u16` | displacement back from `SP` |
+| `JMP` / `JZ` / `JNZ` | `i32` | relative to the first byte of the *next* instruction |
+| `HOST` | `u8` | host table index |
+
+Widths are fixed per opcode, never variable-length. `PUSH8` exists so small
+constants stay cheap, but nothing is a varint, because a varint makes an
+instruction's encoded size depend on its operand — which is exactly what block
+reordering and opcode renumbering must not have to reason about. The `i32`
+branch offset is deliberately roomy: with calls inlined and no code-size limit
+yet pinned (§R6), an `i16` would impose a hard failure at an arbitrary
+boundary.
 
 Relative branch offsets keep code position-independent. There is no `CALL`/`RET`:
 internal calls are inlined at lowering time (§7.5), so a frame is per *compiled
@@ -196,12 +227,16 @@ pub trait Op: Copy + Sized {
     fn exec<B: ByteOrder>(&self, vm: &mut Vm<B>) -> Result<Flow, Trap>;
 }
 
-struct Add;                           // sp_delta = -8
-struct Push  { imm: Word }            // sp_delta = +8
-struct Alloc { n: u16 }               // sp_delta = +(n as i32)   ← immediate-dependent
-struct Lds   { w: Width, disp: u16 }  // sp_delta = +8
-struct Sts   { w: Width, disp: u16 }  // sp_delta = -8
+struct Add;                       // sp_delta = -8
+struct Push32 { imm: u32 }        // sp_delta = +8
+struct Alloc  { n: u16 }          // sp_delta = +(n as i32)   ← immediate-dependent
+struct Lds32  { disp: u16 }       // sp_delta = +8
+struct Sts32  { disp: u16 }       // sp_delta = -8
 ```
+
+Access width is part of the *opcode*, not a field: `Lds8`/`Lds32`/`Lds64` are
+three types, because `OPCODE` is an associated const and one type cannot carry
+three of them. It also keeps decoding a fixed-width read per opcode.
 
 Every op is declared once, in a `define_ops!` table that generates the structs,
 the `Instr` enum and its forwarding `impl Op`, the decode dispatch, and the
@@ -314,12 +349,20 @@ Out-of-subset constructs are rejected with `syn::Error::new_spanned`.
 ### 6.1 Image map
 
 ```
-0x0000  .rodata    literals, const tables, S-boxes        (immutable image)
-0x0800  .input     marshalled input aggregate(s), per VmLayout   (UNTRUSTED)
-0x1000  .ret        return slot / marshalled return aggregate
-0x2000  .scratch   work area, output buffers
-0x3000  .stack     frame + operand stack, grows upward; SP bound-checked to here
+.rodata    literals, const tables, S-boxes                (immutable image)
+.input     marshalled input aggregate(s), per VmLayout         (UNTRUSTED)
+.ret       return slot / marshalled return aggregate
+.scratch   work area, output buffers
+.stack     frame + operand stack, grows upward; SP bound-checked to its end
 ```
+
+**The order of the regions is fixed; the addresses are not.** Bases are computed
+per program from the sizes the build actually needs and recorded in
+`Program<B>`, which is what the interpreter bounds-checks against. Hard-coding
+`.rodata` at `0x0000` and `.input` at `0x0800` would cap a const table at 2 KiB
+for no reason and pad every small program to the same size; a computed layout
+costs one struct of `u32`s and removes a whole class of "the S-box grew" bug.
+Sizes are known at finalization, so nothing about this is dynamic.
 
 One address space, not two: `.stack` is a region like any other, `LD*`/`ST*` can
 address it with an absolute address, and `LDS`/`STS` are the SP-relative form of
@@ -683,12 +726,24 @@ its encoding and its `sp_delta` in the `define_ops!` table (§3.4), not in a
 parallel `match`. Monomorphized to the build's byte order, so every `LD*`/`ST*`/
 `LDS`/`STS` compiles to that order's byte shuffle with no dispatch on order.
 
-Hardening every dispatch: PC bounds; memory bounds (in the interpreter, not
-emitted); `SP` bounds in both directions — overflow past `.stack`'s end and
-underflow below its base are traps, the check that replaces the old locals
-array's implicit in-range indexing; explicit wrapping arithmetic; divide-by-zero
-trap; and a **fuel counter** turning infinite loops into a clean error. `run()`
-returns `Result<Halt, Trap>`. A debug build additionally carries a side table of
+Hardening every dispatch, and unconditionally for now: PC bounds; memory bounds
+(in the interpreter, not emitted); `SP` bounds in both directions — overflow past
+`.stack`'s end and underflow below its base are traps, the check that replaces
+the old locals array's implicit in-range indexing; explicit wrapping arithmetic;
+division traps (zero divisor, and `i64::MIN / -1` for the signed pair); and a
+**fuel counter**, one unit per instruction, turning an infinite loop into a clean
+`Trap::OutOfFuel`. `run()` returns `Result<Halt, Trap>`. Making any of this
+optional is deferred: a knob is easy to add later and impossible to trust if the
+unhardened path was never the tested one (§R8).
+
+**Decode failure and trap are different types.** `DecodeErr` describes bytes that
+are not a program — a truncated immediate, an unassigned opcode, an `ALLOC` whose
+operand is not a multiple of 8 — and belongs to tooling: the disassembler, the
+round-trip test, anything that loads an image it did not build. `Trap` describes
+a program that ran and did something it may not. The interpreter decodes as it
+goes, so it converts the former into `Trap::BadInstruction` at the fetch site,
+but the two stay separate types: collapsing them would put "this artifact is
+corrupt" and "the guest divided by zero" on one code path. A debug build additionally carries a side table of
 (code offset → expected SP) emitted by finalization and asserts it at each block
 entry — off in release, since it is a compiler-bug detector, not a guest-input
 defense (§R9).
@@ -754,12 +809,14 @@ Each phase ends runnable and tested; the two harnesses grow continuously.
   both orders exercised by parameterized tests; `missing_docs` denied
   workspace-wide; release profile (`lto`, `panic="abort"`, `strip`, `opt-level`)
   pinned.
-- **Phase 1 — ISA + interpreter.** The `define_ops!` table — one declaration per
-  opcode generating struct, `impl Op` (`sp_delta`, `encode`, `decode`, `exec`),
-  `Instr` and the mnemonic table — plus `Vm<B>` with byte stack, `SP`, frames
-  (`ALLOC`/`FREE`/`LDS`/`STS`), all traps + fuel. Tested via a **throwaway
-  hand-assembler** (superseded in Phase 3), which also seeds the differential
-  harness. The suite runs under both orders from here on.
+- **Phase 1 — ISA + interpreter.** One struct per opcode implementing `Op`
+  (`sp_delta`, `size`, `encode`, `decode`, `exec`), the `Instr` enum, and the
+  mnemonic table. The first few ops are written by hand and `define_ops!` is
+  extracted once the shape has settled, rather than designed against a sketch.
+  Then `Vm<B>` with byte stack, `SP`, frames (`ALLOC`/`FREE`/`LDS*`/`STS*`), all
+  traps + fuel. Tested via a **throwaway hand-assembler** (superseded in Phase 3),
+  which also seeds the differential harness. The suite runs under both orders from
+  here on.
 - **Phase 2 — IR + assembler.** `Cfg`/`Frame`/`Block`/`Terminator`, the SP
   validator folding `sp_delta()` (never a table), symbolic `Local(cell)`, block
   layout + backpatch, displacement materialization in finalization, symbolic-hole
@@ -1021,10 +1078,13 @@ loudly.
 - **The single-error-type `?` restriction** collides with per-host-call error
   types (§7.4/§7.5): fallible host calls cannot each carry their own error and
   still be used with `?`. Minor, but name it.
-- **Unconditional interpreter hardening vs. size/recognizability.** Bounds checks
-  and fuel target "players feed garbage," which only bites if players supply
-  input. For a pure baked-input reversing challenge, some hardening is dead weight
-  that also enlarges and clarifies the dispatch loop. Make it threat-model-gated.
+- **Unconditional interpreter hardening vs. size/recognizability** *(deferred by
+  decision)*. Bounds checks and fuel target "players feed garbage," which only
+  bites if players supply input. For a pure baked-input reversing challenge, some
+  hardening is dead weight that also enlarges and clarifies the dispatch loop.
+  Gating it on the threat model remains the right end state, but everything is
+  unconditional to begin with: the stripped-down path has to be a deviation from
+  something tested, not the only thing ever built.
 
 ## What holds up
 
