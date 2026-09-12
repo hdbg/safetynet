@@ -114,6 +114,7 @@ implementors:
 ```rust
 pub trait ByteOrder: sealed::Sealed + Copy + Clone + Debug + 'static {
     const NAME: &'static str;                      // "le" / "be" — diagnostics only
+    fn read_u16(bytes: [u8; 2]) -> u16;    fn write_u16(value: u16) -> [u8; 2];
     fn read_u32(bytes: [u8; 4]) -> u32;    fn write_u32(value: u32) -> [u8; 4];
     fn read_u64(bytes: [u8; 8]) -> u64;    fn write_u64(value: u64) -> [u8; 8];
 }
@@ -238,9 +239,16 @@ Access width is part of the *opcode*, not a field: `Lds8`/`Lds32`/`Lds64` are
 three types, because `OPCODE` is an associated const and one type cannot carry
 three of them. It also keeps decoding a fixed-width read per opcode.
 
+No memory access is two bytes wide; `read_u16`/`write_u16` exist for instruction
+immediates — frame displacements and `ALLOC`/`FREE` sizes — which are encoded in
+the same order as everything else in the image.
+
 Every op is declared once, in a `define_ops!` table that generates the structs,
-the `Instr` enum and its forwarding `impl Op`, the decode dispatch, and the
-mnemonic table shared by `sn_asm!` (§8.1) and the disassembler:
+the `Instr` enum with forwarding methods, the decode dispatch, and the mnemonic
+table shared by `sn_asm!` (§8.1) and the disassembler. `Instr` carries inherent
+methods rather than `impl Op`: `OPCODE` and `MNEMONIC` are associated consts, and
+an enum ranging over the whole instruction set has no single value for either.
+The names and meanings are the same.
 
 ```rust
 define_ops! {

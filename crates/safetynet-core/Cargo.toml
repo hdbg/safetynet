@@ -8,6 +8,8 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
+musli = { version = "0.1.7", default-features = false, features = ["alloc", "storage"] }
+thiserror.workspace = true
 
 [lints]
 workspace = true

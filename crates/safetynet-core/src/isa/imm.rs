@@ -154,7 +154,7 @@ impl FrameSize {
         let word = crate::WORD_SIZE as u16;
         match bytes.checked_next_multiple_of(word) {
             Some(rounded) => Some(Self(rounded)),
-            None => None,
+            _ => None,
         }
     }
 
