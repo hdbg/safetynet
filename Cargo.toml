@@ -13,6 +13,7 @@ repository = "https://github.com/hdbg/safetynet"
 [workspace.dependencies]
 safetynet-core = { path = "crates/safetynet-core", version = "0.1.0" }
 safetynet-macros = { path = "crates/safetynet-macros", version = "0.1.0" }
+safetynet-blackbox = { path = "crates/safetynet-blackbox", version = "0.1.0" }
 proc-macro2 = "1"
 quote = "1"
 syn = { version = "3", features = ["full", "extra-traits"] }
