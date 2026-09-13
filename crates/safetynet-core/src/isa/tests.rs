@@ -102,6 +102,47 @@ fn misaligned_frame_size_fails_to_decode() {
     assert!(err.to_string().contains("multiple"), "{err}");
 }
 
+/// The anchor every total pass over the instruction set is checked against, so
+/// it has to actually be one instruction of each kind.
+#[test]
+fn one_of_each_covers_the_table_once() {
+    let all = Instr::one_of_each();
+    assert_eq!(all.len(), 43);
+
+    let mut mnemonics: Vec<&str> = all.iter().map(|instr| instr.mnemonic()).collect();
+    mnemonics.sort_unstable();
+    mnemonics.dedup();
+    assert_eq!(mnemonics.len(), all.len(), "two entries share a mnemonic");
+}
+
+/// Every instruction has a printed form, and it is the mnemonic plus the
+/// operands the table gave it — nothing in the set takes more than one.
+#[test]
+fn every_instruction_prints_as_its_mnemonic_and_operands() {
+    for instr in Instr::one_of_each() {
+        let text = instr.to_string();
+        let words: Vec<&str> = text.split(' ').collect();
+
+        assert_eq!(words.first().copied(), Some(instr.mnemonic()), "{text}");
+        assert!(words.len() <= 2, "more operands than expected: {text}");
+    }
+}
+
+/// Operands print as plain decimals: what the assembler reads back, not what a
+/// `Debug` derive would produce.
+#[test]
+fn operands_print_as_plain_decimals() {
+    let frame = FrameSize::new(24).expect("24 is word-aligned");
+
+    assert_eq!(Instr::from(Halt).to_string(), "halt");
+    assert_eq!(
+        Instr::from(Push32 { imm: 0xdead_beef }).to_string(),
+        "push32 3735928559"
+    );
+    assert_eq!(Instr::from(Jz { offset: -12 }).to_string(), "jz -12");
+    assert_eq!(Instr::from(Alloc { n: frame }).to_string(), "alloc 24");
+}
+
 /// The stack effect has to come from the operand, not a constant, or `ALLOC`
 /// would be indistinguishable from a no-op to the validator.
 #[test]

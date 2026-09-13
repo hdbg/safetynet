@@ -5,6 +5,7 @@
 //! and both `safetynet-macros` and the runtime depend on it. That is what keeps
 //! the encoder and the decoder from drifting: they are declared together, once.
 
+pub mod asm;
 pub mod byte_order;
 pub mod encoding;
 pub mod image;
@@ -17,6 +18,7 @@ mod width;
 
 pub use byte_order::{Be, ByteOrder, Le};
 pub use image::{Image, Layout, Region};
+pub use ir::{Artifact, Reloc};
 pub use isa::{FrameSize, Instr, Op};
 pub use program::Program;
 pub use vm::{Flow, Trap, Vm};

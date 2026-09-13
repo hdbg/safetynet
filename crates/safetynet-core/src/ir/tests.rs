@@ -53,6 +53,31 @@ fn a_frame_stops_where_displacements_do() {
     assert_eq!(frame.cells().len(), cells);
 }
 
+/// Rebuilding a frame from its widths has to land on the same offsets adding
+/// the cells one at a time does, or a graph that survived a round trip would
+/// address a different frame than the one it was written against.
+#[test]
+fn a_frame_of_widths_is_the_frame_those_cells_built() {
+    let widths = [Width::U8, Width::U64, Width::U32, Width::U8];
+
+    let mut expected = Frame::new();
+    for width in widths {
+        expected.add(width).expect("room");
+    }
+
+    assert_eq!(Frame::from_widths(widths), Some(expected));
+}
+
+/// And it refuses where `add` refuses, rather than truncating the frame.
+#[test]
+fn a_frame_of_widths_stops_where_displacements_do() {
+    assert!(Frame::from_widths(core::iter::repeat_n(Width::U64, 8191)).is_some());
+    assert_eq!(
+        Frame::from_widths(core::iter::repeat_n(Width::U64, 8192)),
+        None
+    );
+}
+
 // -- items and terminators ------------------------------------------------
 
 /// A symbolic access knows its stack effect without knowing its displacement.

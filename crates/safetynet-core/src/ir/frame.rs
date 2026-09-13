@@ -34,6 +34,17 @@ impl CellId {
     pub const fn index(self) -> usize {
         self.0 as usize
     }
+
+    /// The cell at `index`, for naming a cell by position.
+    ///
+    /// Nothing is checked here — a `CellId` is only ever a position, and one
+    /// no frame holds is reported as [`Invalid::NoSuchCell`] when the graph
+    /// that uses it is validated.
+    ///
+    /// [`Invalid::NoSuchCell`]: crate::ir::Invalid::NoSuchCell
+    pub const fn from_index(index: u16) -> Self {
+        Self(index)
+    }
 }
 
 /// The frame layout: one cell per local, and the size to reserve for them.
@@ -90,6 +101,19 @@ impl Frame {
         self.size = size;
 
         Some(id)
+    }
+
+    /// A frame holding one cell per width, in the order given.
+    ///
+    /// Lays them out exactly as [`add`](Frame::add) would one at a time, for
+    /// rebuilding a frame whose cells are already known. Returns `None` on the
+    /// first width that does not fit.
+    pub fn from_widths(widths: impl IntoIterator<Item = Width>) -> Option<Self> {
+        let mut frame = Self::new();
+        for width in widths {
+            frame.add(width)?;
+        }
+        Some(frame)
     }
 
     /// The cell `id` names.

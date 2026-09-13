@@ -20,7 +20,10 @@ mod frame;
 mod validate;
 
 pub use builder::{BlockBody, BuildError, Builder};
-pub use finalize::{NotFinal, finalize, finalize_with};
+pub use finalize::{
+    Artifact, BaseReloc, NotFinal, Reloc, Resolved, assemble, assemble_with, finalize,
+    finalize_with, resolve,
+};
 pub use frame::{Cell, CellId, Frame};
 pub use validate::{Invalid, Limits, Where, validate, validate_with};
 
@@ -40,8 +43,12 @@ impl BlockId {
         self.0 as usize
     }
 
-    /// The block at `index`, for walking a graph by position.
-    pub(crate) const fn from_index(index: usize) -> Self {
+    /// The block at `index`, for naming a block by position.
+    ///
+    /// Nothing is checked here — a `BlockId` is only ever a position, and one
+    /// no graph holds is reported as [`Invalid::NoSuchBlock`] when the graph
+    /// that uses it is validated.
+    pub const fn from_index(index: usize) -> Self {
         Self(index as u32)
     }
 }

@@ -45,6 +45,13 @@ impl FrameSize {
     }
 }
 
+impl core::fmt::Display for FrameSize {
+    /// Prints the byte count, which is what an assembly operand spells.
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(f, "{}", self.bytes())
+    }
+}
+
 impl<'de, M, A> Decode<'de, M, A> for FrameSize
 where
     A: Allocator,

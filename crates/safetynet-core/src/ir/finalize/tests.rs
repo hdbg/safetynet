@@ -297,6 +297,7 @@ fn an_invalid_graph_is_not_finalized() {
 
 /// An encoder that measures one thing and writes another would move every
 /// instruction out from under the branches aimed at it.
+#[derive(Clone)]
 struct Liar;
 
 impl Encoder for Liar {

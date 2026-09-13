@@ -200,6 +200,12 @@ impl<B: ByteOrder> Packed<B> {
     }
 }
 
+impl<B: ByteOrder> Clone for Packed<B> {
+    fn clone(&self) -> Self {
+        Self::new()
+    }
+}
+
 impl<B: ByteOrder> Default for Packed<B> {
     fn default() -> Self {
         Self::new()
