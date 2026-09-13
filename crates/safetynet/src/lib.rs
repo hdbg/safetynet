@@ -24,6 +24,9 @@ pub use safetynet_core::*;
 /// Assembles a program at compile time.
 pub use safetynet_macros::asm;
 
+/// Compiles an annotated function to VM bytecode.
+pub use safetynet_macros::safetynet;
+
 /// Derives [`VmLayout`] for a struct.
 pub use safetynet_macros::VmLayout;
 

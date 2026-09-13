@@ -3,6 +3,7 @@
 mod asm;
 mod backend;
 mod derive;
+mod lower;
 
 use proc_macro::TokenStream;
 
@@ -71,6 +72,15 @@ pub fn derive_vm_value(input: TokenStream) -> TokenStream {
 #[proc_macro]
 pub fn asm(input: TokenStream) -> TokenStream {
     match asm::expand(input.into()) {
+        Ok(expansion) => expansion.into(),
+        Err(error) => error.to_compile_error().into(),
+    }
+}
+
+/// Compiles a function to VM bytecode.
+#[proc_macro_attribute]
+pub fn safetynet(attr: TokenStream, item: TokenStream) -> TokenStream {
+    match lower::expand(attr.into(), item.into()) {
         Ok(expansion) => expansion.into(),
         Err(error) => error.to_compile_error().into(),
     }
