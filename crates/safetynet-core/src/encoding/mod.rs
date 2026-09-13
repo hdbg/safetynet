@@ -24,6 +24,8 @@
 //! branch each function makes on it folds away when it is monomorphized: the
 //! shipped binary holds one order's codec, with no runtime test.
 
+use core::marker::PhantomData;
+
 use musli::options::{self, ByteOrder as MusliOrder, Integer, Options};
 use musli::storage::{Encoding, Error as WireError};
 use musli::{Context, Writer};
@@ -157,6 +159,70 @@ pub fn decode<B: ByteOrder>(code: &[u8]) -> Result<(Instr, usize), DecodeError> 
 /// learns the instruction's length
 fn read<B: ByteOrder>(cursor: &mut &[u8]) -> Result<Instr, WireError> {
     with_wire!(B, |wire| wire.decode(cursor))
+}
+
+/// How instructions become bytes.
+///
+/// Block layout is written against this rather than against the packed format
+/// below, so that a later encoding — renumbered, reordered, padded — drops in
+/// without layout knowing. Two rules an implementation has to keep, because
+/// layout resolves offsets in a single pass:
+///
+/// - [`encoded_len`](Encoder::encoded_len) is exactly what
+///   [`encode`](Encoder::encode) writes;
+/// - a length may depend on the opcode but **not** on a branch offset's value,
+///   or the layout would shift under its own resolution.
+pub trait Encoder {
+    /// The order multi-byte operands are laid out in.
+    ///
+    /// Carried by the encoder rather than chosen separately, so that a program
+    /// cannot be laid out in one order and encoded in another.
+    type Order: ByteOrder;
+
+    /// Why an instruction could not be written.
+    type Error: core::error::Error + Send + Sync + 'static;
+
+    /// Appends `instr` to `out`, returning how many bytes it took.
+    fn encode(&self, instr: Instr, out: &mut Vec<u8>) -> Result<usize, Self::Error>;
+
+    /// How many bytes `instr` will take.
+    fn encoded_len(&self, instr: Instr) -> Result<usize, Self::Error>;
+}
+
+/// The standard encoding: a tag byte, then fixed-width operands, packed end to
+/// end.
+pub struct Packed<B: ByteOrder>(PhantomData<B>);
+
+impl<B: ByteOrder> Packed<B> {
+    /// The encoder for byte order `B`.
+    pub const fn new() -> Self {
+        Self(PhantomData)
+    }
+}
+
+impl<B: ByteOrder> Default for Packed<B> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl<B: ByteOrder> core::fmt::Debug for Packed<B> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_tuple("Packed").field(&B::NAME).finish()
+    }
+}
+
+impl<B: ByteOrder> Encoder for Packed<B> {
+    type Order = B;
+    type Error = EncodeError;
+
+    fn encode(&self, instr: Instr, out: &mut Vec<u8>) -> Result<usize, Self::Error> {
+        encode::<B>(instr, out)
+    }
+
+    fn encoded_len(&self, instr: Instr) -> Result<usize, Self::Error> {
+        encoded_len(instr)
+    }
 }
 
 /// An instruction could not be turned into bytes.

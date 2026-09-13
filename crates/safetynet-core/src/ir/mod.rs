@@ -15,10 +15,12 @@
 //! and everything it does not touch must stay correct.
 
 mod builder;
+mod finalize;
 mod frame;
 mod validate;
 
 pub use builder::{BlockBody, BuildError, Builder};
+pub use finalize::{NotFinal, finalize, finalize_with};
 pub use frame::{Cell, CellId, Frame};
 pub use validate::{Invalid, Limits, Where, validate, validate_with};
 
