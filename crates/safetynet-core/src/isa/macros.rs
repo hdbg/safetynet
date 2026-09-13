@@ -77,15 +77,15 @@ macro_rules! define_ops {
                 }
 
                 // `#[inline(always)]` folds every handler into the fetch loop,
-                // and `black_box` keeps the optimizer from then merging or
-                // folding them back out — the interpreter's shape survives into
-                // the binary instead of collapsing to the arithmetic it stands
-                // for.
+                // and `blackboxify!` wraps every call and sub-expression of the
+                // body in `black_box`, so the optimizer cannot merge or fold the
+                // handlers back out — the interpreter's shape survives into the
+                // binary instead of collapsing to the arithmetic it stands for.
                 #[inline(always)]
                 fn exec<B: ByteOrder>(&self, vm: &mut Vm<B>) -> Result<Flow, Trap> {
                     let $vm: &mut Vm<B> = vm;
                     let $exec_op: &Self = self;
-                    ::core::hint::black_box($exec)
+                    ::safetynet_blackbox::blackboxify! { $exec }
                 }
             }
 
