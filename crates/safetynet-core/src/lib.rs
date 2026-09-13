@@ -7,12 +7,16 @@
 
 pub mod byte_order;
 pub mod encoding;
+pub mod ir;
 pub mod isa;
 pub mod vm;
+
+mod width;
 
 pub use byte_order::{Be, ByteOrder, Le};
 pub use isa::{FrameSize, Instr, Op};
 pub use vm::{Flow, Trap, Vm};
+pub use width::Width;
 
 #[cfg(test)]
 mod samples;

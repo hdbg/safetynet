@@ -34,8 +34,8 @@ use musli::alloc::Global;
 use musli::mode::Binary;
 use musli::{Decode, Encode};
 
-use crate::vm::{Flow, Trap, Vm, Width, div, rem, sdiv, srem};
-use crate::{ByteOrder, WORD_SIZE, Word};
+use crate::vm::{Flow, Trap, Vm, div, rem, sdiv, srem};
+use crate::{ByteOrder, WORD_SIZE, Width, Word};
 use macros::{define_op_struct, define_ops};
 
 pub use frame_size::FrameSize;

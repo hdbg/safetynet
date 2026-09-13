@@ -26,7 +26,7 @@
 use core::fmt;
 use core::marker::PhantomData;
 
-use crate::{ByteOrder, FrameSize, Instr, WORD_SIZE, Word};
+use crate::{ByteOrder, FrameSize, Instr, WORD_SIZE, Width, Word};
 
 mod run;
 
@@ -127,28 +127,6 @@ pub enum Trap {
     /// The fuel budget ran out mid-program.
     #[error("out of fuel")]
     OutOfFuel,
-}
-
-/// Width of a memory or frame access, in bytes.
-///
-/// An enum rather than a number so that every read and write matches over the
-/// same three cases and no width can arrive from anywhere but an opcode.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub(crate) enum Width {
-    U8,
-    U32,
-    U64,
-}
-
-impl Width {
-    /// The width in bytes, for reporting.
-    const fn bytes(self) -> usize {
-        match self {
-            Self::U8 => 1,
-            Self::U32 => 4,
-            Self::U64 => 8,
-        }
-    }
 }
 
 /// A stack machine over one flat byte address space.
@@ -407,7 +385,7 @@ impl<B: ByteOrder> Vm<B> {
     fn offset(address: Word, width: Width) -> Result<usize, Trap> {
         usize::try_from(address).map_err(|_| Trap::OutOfBounds {
             address,
-            width: width.bytes(),
+            width: usize::from(width.bytes()),
         })
     }
 
@@ -429,7 +407,7 @@ impl<B: ByteOrder> Vm<B> {
     fn read(&self, offset: usize, width: Width, address: Word) -> Result<Word, Trap> {
         let out_of_bounds = || Trap::OutOfBounds {
             address,
-            width: width.bytes(),
+            width: usize::from(width.bytes()),
         };
         let from = self.memory.get(offset..).ok_or_else(out_of_bounds)?;
 
@@ -454,7 +432,7 @@ impl<B: ByteOrder> Vm<B> {
     ) -> Result<(), Trap> {
         let out_of_bounds = || Trap::OutOfBounds {
             address,
-            width: width.bytes(),
+            width: usize::from(width.bytes()),
         };
         let into = self.memory.get_mut(offset..).ok_or_else(out_of_bounds)?;
 
