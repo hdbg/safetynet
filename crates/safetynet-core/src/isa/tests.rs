@@ -3,67 +3,14 @@
 use musli::storage::Encoding;
 
 use super::*;
+use crate::samples::instructions;
 
 const WIRE: Encoding = Encoding::new();
-
-/// One instruction of every shape the encoding has: no operands, each operand
-/// width, a validated operand, and a signed offset.
-fn sample_instructions() -> Vec<Instr> {
-    let frame = FrameSize::new(24).expect("24 is word-aligned");
-    vec![
-        Halt.into(),
-        Push8 { imm: 0xa5 }.into(),
-        Push32 { imm: 0xdead_beef }.into(),
-        Push64 {
-            imm: 0x0102_0304_0506_0708,
-        }
-        .into(),
-        Drop.into(),
-        Alloc { n: frame }.into(),
-        Free { n: frame }.into(),
-        Lds8 { disp: 1 }.into(),
-        Lds32 { disp: 0x1234 }.into(),
-        Lds64 { disp: u16::MAX }.into(),
-        Sts8 { disp: 8 }.into(),
-        Sts32 { disp: 16 }.into(),
-        Sts64 { disp: 24 }.into(),
-        Ld8.into(),
-        Ld32.into(),
-        Ld64.into(),
-        St8.into(),
-        St32.into(),
-        St64.into(),
-        Add.into(),
-        Sub.into(),
-        Mul.into(),
-        Div.into(),
-        Rem.into(),
-        SDiv.into(),
-        SRem.into(),
-        And.into(),
-        Or.into(),
-        Xor.into(),
-        BitNot.into(),
-        Shl.into(),
-        Shr.into(),
-        Sar.into(),
-        CmpEq.into(),
-        CmpLt.into(),
-        CmpLe.into(),
-        CmpSLt.into(),
-        CmpSLe.into(),
-        Jmp { offset: 0 }.into(),
-        Jz { offset: -12 }.into(),
-        Jnz { offset: i32::MIN }.into(),
-        Switch.into(),
-        Host { index: 3 }.into(),
-    ]
-}
 
 /// `decode(encode(x)) == x` for every shape of instruction.
 #[test]
 fn round_trips() {
-    for instr in sample_instructions() {
+    for instr in instructions() {
         let bytes = WIRE.to_vec(&instr).expect("encodes");
         let decoded: Instr = WIRE.from_slice(&bytes).expect("decodes");
         assert_eq!(decoded, instr, "round-trip changed the instruction");
@@ -74,7 +21,7 @@ fn round_trips() {
 /// property a whole program depends on and a single instruction cannot show.
 #[test]
 fn decodes_a_stream() {
-    let program = sample_instructions();
+    let program = instructions();
 
     let mut bytes = Vec::new();
     for instr in &program {
@@ -94,7 +41,7 @@ fn decodes_a_stream() {
 /// one the derive owes us: no two instructions share a tag.
 #[test]
 fn variants_get_distinct_tags() {
-    let mut tags: Vec<(u8, &str)> = sample_instructions()
+    let mut tags: Vec<(u8, &str)> = instructions()
         .iter()
         .map(|instr| {
             let bytes = WIRE.to_vec(instr).expect("encodes");

@@ -6,12 +6,16 @@
 //! the encoder and the decoder from drifting: they are declared together, once.
 
 pub mod byte_order;
+pub mod encoding;
 pub mod isa;
 pub mod vm;
 
 pub use byte_order::{Be, ByteOrder, Le};
 pub use isa::{FrameSize, Instr, Op};
 pub use vm::{Flow, Trap, Vm};
+
+#[cfg(test)]
+mod samples;
 
 /// The VM's machine word: one `u64`, wrapping, monomorphic.
 pub type Word = u64;

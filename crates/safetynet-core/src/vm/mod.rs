@@ -28,6 +28,8 @@ use core::marker::PhantomData;
 
 use crate::{ByteOrder, FrameSize, Instr, WORD_SIZE, Word};
 
+mod run;
+
 #[cfg(test)]
 mod tests;
 
@@ -90,6 +92,41 @@ pub enum Trap {
         /// Mnemonic of the reserved instruction.
         mnemonic: &'static str,
     },
+
+    // The rest are raised by the fetch loop rather than by an instruction: they
+    // are what a program counter can do wrong, plus the budget that bounds it.
+    /// The bytes at this offset do not begin an instruction.
+    ///
+    /// A decode failure and a trap stay separate types everywhere else — "this
+    /// artifact is corrupt" and "the guest divided by zero" are different
+    /// claims — but a machine that is already running has nowhere to report the
+    /// former except as a trap.
+    #[error("the bytes at {offset:#x} do not begin an instruction")]
+    BadInstruction {
+        /// Offset of the byte the program counter was on.
+        offset: usize,
+    },
+
+    /// The program counter left the code, most often by running past the last
+    /// instruction without meeting a `HALT`.
+    #[error("the program counter left the code at {offset:#x}")]
+    CodeOutOfRange {
+        /// Offset the program counter reached.
+        offset: usize,
+    },
+
+    /// A branch aimed outside the code.
+    #[error("the branch at {from:#x} aims {delta} bytes outside the code")]
+    BadJump {
+        /// Offset of the branch instruction.
+        from: usize,
+        /// The offset it carried.
+        delta: i32,
+    },
+
+    /// The fuel budget ran out mid-program.
+    #[error("out of fuel")]
+    OutOfFuel,
 }
 
 /// Width of a memory or frame access, in bytes.
@@ -465,7 +502,6 @@ pub(crate) fn rem(lhs: Word, rhs: Word) -> Result<Word, Trap> {
 
 /// Signed division, trapping on a zero divisor and on `i64::MIN / -1`.
 #[inline(always)]
-
 pub(crate) fn sdiv(lhs: Word, rhs: Word) -> Result<Word, Trap> {
     signed(lhs, rhs, i64::checked_div)
 }

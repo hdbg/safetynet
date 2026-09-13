@@ -2,6 +2,7 @@
 
 use super::*;
 use crate::isa::*;
+use crate::samples::instructions;
 use crate::{Be, Le};
 
 /// Room for a stack that some tests drive a long way up, and for an image below
@@ -456,60 +457,6 @@ fn reserved_instructions_trap() {
 
 // -- the SP model ---------------------------------------------------------
 
-/// Every instruction, each with an operand this machine can actually run: a
-/// displacement that stays inside the prologue below, and a divisor that is not
-/// zero.
-fn every_instruction() -> Vec<Instr> {
-    vec![
-        Halt.into(),
-        Push8 { imm: 0xa5 }.into(),
-        Push32 { imm: 0xdead_beef }.into(),
-        Push64 {
-            imm: 0x0102_0304_0506_0708,
-        }
-        .into(),
-        Drop.into(),
-        Alloc { n: frame(24) }.into(),
-        Free { n: frame(24) }.into(),
-        Lds8 { disp: 1 }.into(),
-        Lds32 { disp: 12 }.into(),
-        Lds64 { disp: 8 }.into(),
-        Sts8 { disp: 17 }.into(),
-        Sts32 { disp: 20 }.into(),
-        Sts64 { disp: 24 }.into(),
-        Ld8.into(),
-        Ld32.into(),
-        Ld64.into(),
-        St8.into(),
-        St32.into(),
-        St64.into(),
-        Add.into(),
-        Sub.into(),
-        Mul.into(),
-        Div.into(),
-        Rem.into(),
-        SDiv.into(),
-        SRem.into(),
-        And.into(),
-        Or.into(),
-        Xor.into(),
-        BitNot.into(),
-        Shl.into(),
-        Shr.into(),
-        Sar.into(),
-        CmpEq.into(),
-        CmpLt.into(),
-        CmpLe.into(),
-        CmpSLt.into(),
-        CmpSLe.into(),
-        Jmp { offset: 0 }.into(),
-        Jz { offset: -12 }.into(),
-        Jnz { offset: i32::MIN }.into(),
-        Switch.into(),
-        Host { index: 3 }.into(),
-    ]
-}
-
 /// Every instruction moves `SP` by exactly what it said it would.
 ///
 /// This is the load-bearing one. Since locals are addressed by displacement back
@@ -517,7 +464,7 @@ fn every_instruction() -> Vec<Instr> {
 /// as a stack runaway the validator catches — it shows up as a silent read of
 /// the wrong cell, arbitrarily far away.
 fn sp_delta_predicts_execution<B: ByteOrder>() {
-    for instr in every_instruction() {
+    for instr in instructions() {
         // The reserved opcodes never run, so there is nothing to predict.
         if matches!(instr, Instr::Switch(_) | Instr::Host(_)) {
             continue;
