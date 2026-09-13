@@ -10,6 +10,14 @@ specifiers = [
     "0.13.10",
 ]
 
+[[tools."cargo:cargo-expand"]]
+version = "1.0.126"
+backend = "cargo:cargo-expand"
+specifiers = [
+    "1.0.126",
+    "latest",
+]
+
 [[tools."cargo:cargo-nextest"]]
 version = "0.9.133"
 backend = "cargo:cargo-nextest"

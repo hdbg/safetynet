@@ -1,4 +1,5 @@
 [tools]
 "cargo:cargo-edit" = "0.13"
+"cargo:cargo-expand" = "1.0.126"
 "cargo:cargo-nextest" = "0.9.133"
 rust = {version = "1.98.1", components = ["rust-src", "rust-analyzer", "rustfmt", "clippy"]}
