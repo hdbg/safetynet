@@ -18,9 +18,8 @@ use safetynet_core::ir::{
     BlockId, BuildError, Cfg, Frame, Invalid, Item, Terminator, Where, validate,
 };
 
-use syn::{Ident, Path};
-
 use super::ast::{CellDecl, Program, RawBlock, RawItem, RawTerm};
+use crate::backend::{FieldRef, TagRef};
 
 /// A program that has been assembled: the graph, and what is needed to talk
 /// about it in the user's own words.
@@ -36,19 +35,6 @@ pub(crate) struct Lowered {
     pub(crate) tag_refs: Vec<TagRef>,
     spans: SpanTable,
     names: Names,
-}
-
-/// A field reference the call site resolves: its type and the path into it.
-#[derive(Debug)]
-pub(crate) struct FieldRef {
-    pub(crate) ty: Path,
-    pub(crate) path: Vec<Ident>,
-}
-
-/// A variant reference the call site resolves to a discriminant word.
-#[derive(Debug)]
-pub(crate) struct TagRef {
-    pub(crate) path: Path,
 }
 
 impl Lowered {
