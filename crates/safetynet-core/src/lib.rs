@@ -11,6 +11,7 @@ pub mod encoding;
 pub mod image;
 pub mod ir;
 pub mod isa;
+pub mod link;
 pub mod program;
 pub mod vm;
 
@@ -22,6 +23,7 @@ pub use byte_order::{Be, ByteOrder, Le};
 pub use image::{Image, Layout, Region};
 pub use ir::{Artifact, Reloc};
 pub use isa::{FrameSize, Instr, Op};
+pub use link::{FieldPatch, link_fields};
 pub use marshal::{Field, TypeLayout, VmLayout};
 pub use program::Program;
 pub use value::VmValue;

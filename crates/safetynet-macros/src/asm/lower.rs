@@ -18,7 +18,9 @@ use safetynet_core::ir::{
     BlockId, BuildError, Cfg, Frame, Invalid, Item, Terminator, Where, validate,
 };
 
-use super::ast::{CellDecl, Program, RawBlock, RawTerm};
+use syn::{Ident, Path};
+
+use super::ast::{CellDecl, Program, RawBlock, RawItem, RawTerm};
 
 /// A program that has been assembled: the graph, and what is needed to talk
 /// about it in the user's own words.
@@ -28,8 +30,17 @@ pub(crate) struct Lowered {
     pub(crate) entry: u32,
     /// The graph itself.
     pub(crate) cfg: Cfg,
+    /// Field references, indexed by the hole id in [`Item::Field`].
+    pub(crate) field_refs: Vec<FieldRef>,
     spans: SpanTable,
     names: Names,
+}
+
+/// A field reference the call site resolves: its type and the path into it.
+#[derive(Debug)]
+pub(crate) struct FieldRef {
+    pub(crate) ty: Path,
+    pub(crate) path: Vec<Ident>,
 }
 
 impl Lowered {
@@ -112,15 +123,37 @@ pub(crate) fn lower(program: Program) -> syn::Result<Lowered> {
     let mut builder = Cfg::builder(frame);
     let ids: Vec<BlockId> = depths.iter().map(|depth| builder.block(*depth)).collect();
 
+    let mut field_refs = Vec::new();
     for ((block, term), id) in blocks.into_iter().zip(terms).zip(&ids) {
         let body = builder.at(*id).map_err(internal)?;
         for (item, _) in block.items {
             match item {
-                Item::Instr(instr) => body.instr(instr),
-                Item::Load(cell) => body.load(cell),
-                Item::Store(cell) => body.store(cell),
-                Item::Base(region) => body.base(region),
-            };
+                RawItem::Core(Item::Instr(instr)) => {
+                    body.instr(instr);
+                }
+                RawItem::Core(Item::Load(cell)) => {
+                    body.load(cell);
+                }
+                RawItem::Core(Item::Store(cell)) => {
+                    body.store(cell);
+                }
+                RawItem::Core(Item::Base(region)) => {
+                    body.base(region);
+                }
+                RawItem::Core(Item::Field(hole)) => {
+                    body.field(hole);
+                }
+                RawItem::Field { ty, path } => {
+                    let hole = u32::try_from(field_refs.len()).map_err(|_| {
+                        syn::Error::new(
+                            Span::call_site(),
+                            "this program has too many field references",
+                        )
+                    })?;
+                    body.field(hole);
+                    field_refs.push(FieldRef { ty, path });
+                }
+            }
         }
         builder.seal(*id, term).map_err(internal)?;
     }
@@ -133,6 +166,7 @@ pub(crate) fn lower(program: Program) -> syn::Result<Lowered> {
         entry: u32::try_from(entry)
             .map_err(|_| syn::Error::new(Span::call_site(), "this program has too many blocks"))?,
         cfg,
+        field_refs,
         spans,
         names,
     })

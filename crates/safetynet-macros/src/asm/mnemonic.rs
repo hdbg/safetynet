@@ -27,14 +27,14 @@ use safetynet_core::isa::{
 use safetynet_core::{FrameSize, Instr, Region};
 use syn::ext::IdentExt as _;
 use syn::parse::ParseStream;
-use syn::{Ident, LitInt, Token, bracketed, token};
+use syn::{Ident, LitInt, Path, Token, bracketed, token};
 
-use super::ast::{CellDecl, RawTerm, cell_index, opens_block};
+use super::ast::{CellDecl, RawItem, RawTerm, cell_index, opens_block};
 
 /// One statement: either a step of a block's body, or the end of the block.
 #[derive(Debug)]
 pub(crate) enum Stmt {
-    Item(Item, Span),
+    Item(RawItem, Span),
     Term(RawTerm, Span),
 }
 
@@ -119,6 +119,8 @@ pub(crate) fn statement(input: ParseStream, cells: &[CellDecl]) -> syn::Result<S
         "switch" if input.peek(token::Bracket) => table(input, at),
         "switch" => Ok(instr(Switch, at)),
 
+        "field" => field_ref(input, at),
+
         "load" | "store" => {
             let cell = cell(input, cells)?;
             let item = if name == "load" {
@@ -126,7 +128,7 @@ pub(crate) fn statement(input: ParseStream, cells: &[CellDecl]) -> syn::Result<S
             } else {
                 Item::Store(cell)
             };
-            Ok(Stmt::Item(item, at))
+            Ok(Stmt::Item(RawItem::Core(item), at))
         }
 
         "push" => base(input, at),
@@ -140,7 +142,7 @@ pub(crate) fn statement(input: ParseStream, cells: &[CellDecl]) -> syn::Result<S
 
 /// Wraps an instruction as a statement.
 fn instr(instr: impl Into<Instr>, at: Span) -> Stmt {
-    Stmt::Item(Item::Instr(instr.into()), at)
+    Stmt::Item(RawItem::Core(Item::Instr(instr.into())), at)
 }
 
 /// Whether nothing is left of the current block.
@@ -218,7 +220,38 @@ fn base(input: ParseStream, at: Span) -> syn::Result<Stmt> {
         }
     };
 
-    Ok(Stmt::Item(Item::Base(region), at))
+    Ok(Stmt::Item(RawItem::Core(Item::Base(region)), at))
+}
+
+/// `field Packet::header.seq`: a type, then a dotted field path. The last `::`
+/// segment starts the path; `.` continues it.
+fn field_ref(input: ParseStream, at: Span) -> syn::Result<Stmt> {
+    let full: Path = input.parse()?;
+    if full.segments.len() < 2 {
+        return Err(syn::Error::new(
+            at,
+            "`field` needs a type and a field, as in `field Packet::header.seq`",
+        ));
+    }
+
+    let leading_colon = full.leading_colon;
+    let mut segments: Vec<_> = full.segments.into_iter().collect();
+    let Some(first) = segments.pop() else {
+        return Err(syn::Error::new(at, "`field` needs a type and a field"));
+    };
+
+    let ty = Path {
+        leading_colon,
+        segments: segments.into_iter().collect(),
+    };
+
+    let mut path = vec![first.ident];
+    while input.peek(Token![.]) {
+        input.parse::<Token![.]>()?;
+        path.push(Ident::parse_any(input)?.unraw());
+    }
+
+    Ok(Stmt::Item(RawItem::Field { ty, path }, at))
 }
 
 /// A label, keywords included: `loop:` is a perfectly good name for a block.

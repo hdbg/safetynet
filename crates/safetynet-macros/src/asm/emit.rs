@@ -49,18 +49,51 @@ pub(crate) fn emit(order: &Path, lowered: &Lowered) -> syn::Result<TokenStream> 
             .map_err(|error| syn::Error::new(order.span(), format!("cannot assemble: {error}")))?;
     }
 
-    let code = bytes.iter().map(|byte| Literal::u8_suffixed(*byte));
+    let raw = bytes.iter().map(|byte| Literal::u8_suffixed(*byte));
+    let len = Literal::usize_unsuffixed(bytes.len());
     let frame_bytes = Literal::u16_suffixed(resolved.frame().bytes());
 
-    let relocs = resolved.relocs().iter().map(|reloc| {
-        let at = Literal::usize_suffixed(offsets.get(reloc.index).copied().unwrap_or_default());
+    let byte_at =
+        |index: usize| Literal::usize_suffixed(offsets.get(index).copied().unwrap_or_default());
+
+    // Region bases wait for a layout at finalize; field offsets are known now,
+    // so they are baked at compile time by the linker below.
+    let mut relocs = Vec::new();
+    for reloc in resolved.relocs() {
+        let at = byte_at(reloc.index);
         let region = region_tokens(reloc.region);
-        quote!(::safetynet::Reloc::region_base::<#order>(#at, #region))
-    });
+        relocs.push(quote!(::safetynet::Reloc::region_base::<#order>(#at, #region)));
+    }
+
+    let mut patches = Vec::new();
+    for reloc in resolved.field_relocs() {
+        let at = byte_at(reloc.index);
+        let field = lowered.field_refs.get(reloc.hole as usize).ok_or_else(|| {
+            syn::Error::new(
+                order.span(),
+                "a field reference went missing while assembling",
+            )
+        })?;
+        let ty = &field.ty;
+        let names = field
+            .path
+            .iter()
+            .map(|name| Literal::string(&name.to_string()));
+        patches.push(quote! {
+            ::safetynet::FieldPatch {
+                at: #at,
+                layout: <#ty as ::safetynet::VmLayout>::LAYOUT,
+                path: &[#(#names),*],
+            }
+        });
+    }
 
     Ok(quote! {
         {
-            const CODE: &[u8] = &[#(#code),*];
+            const CODE: &[u8] = &::safetynet::link_fields::<#order, #len>(
+                [#(#raw),*],
+                &[#(#patches),*],
+            );
             ::safetynet::Artifact::<#order>::new(
                 CODE,
                 ::safetynet::FrameSize::new(#frame_bytes).unwrap_or_default(),

@@ -22,22 +22,48 @@ impl TypeLayout {
 
     /// The byte offset a dotted field path resolves to, or `None` if a name is
     /// unknown or a non-final name is a scalar.
-    pub fn offset_of(&self, path: &[&str]) -> Option<u32> {
-        let (&last, parents) = path.split_last()?;
+    ///
+    /// `const` so the linker can bake the offset in at compile time.
+    pub const fn offset_of(&self, path: &[&str]) -> Option<u32> {
+        let (&last, parents) = match path.split_last() {
+            Some(split) => split,
+            None => return None,
+        };
 
         let mut here = self;
         let mut base: u32 = 0;
-        for name in parents {
-            let field = here.field(name)?;
-            base = base.checked_add(field.offset)?;
-            here = field.nested?;
+        let mut rest = parents;
+        while let Some((&name, tail)) = rest.split_first() {
+            let field = match here.field(name) {
+                Some(field) => field,
+                None => return None,
+            };
+            base = match base.checked_add(field.offset) {
+                Some(sum) => sum,
+                None => return None,
+            };
+            here = match field.nested {
+                Some(inner) => inner,
+                None => return None,
+            };
+            rest = tail;
         }
 
-        base.checked_add(here.field(last)?.offset)
+        match here.field(last) {
+            Some(field) => base.checked_add(field.offset),
+            None => None,
+        }
     }
 
-    fn field(&self, name: &str) -> Option<Field> {
-        self.fields.iter().copied().find(|f| f.name == name)
+    const fn field(&self, name: &str) -> Option<Field> {
+        let mut rest = self.fields;
+        while let Some((field, tail)) = rest.split_first() {
+            if str_eq(field.name, name) {
+                return Some(*field);
+            }
+            rest = tail;
+        }
+        None
     }
 }
 
@@ -103,6 +129,24 @@ pub trait VmLayout: Sized {
     /// Reads an aggregate back out of `mem`, interpreting multi-byte fields in
     /// order `B`. The inverse of [`marshal`](Self::marshal).
     fn unmarshal<B: ByteOrder>(mem: &[u8]) -> Self;
+}
+
+/// Byte-for-byte string equality, in `const`.
+const fn str_eq(a: &str, b: &str) -> bool {
+    let (mut a, mut b) = (a.as_bytes(), b.as_bytes());
+    loop {
+        match (a.split_first(), b.split_first()) {
+            (Some((x, at)), Some((y, bt))) => {
+                if *x != *y {
+                    return false;
+                }
+                a = at;
+                b = bt;
+            }
+            (None, None) => return true,
+            _ => return false,
+        }
+    }
 }
 
 #[cfg(test)]

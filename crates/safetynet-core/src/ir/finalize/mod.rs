@@ -29,7 +29,6 @@ use super::{Block, BlockId, Cfg, Item, Terminator, Where, validate};
 use crate::encoding::{Encoder, Packed, encode, encoded_len};
 use crate::ir::{Frame, Invalid};
 use crate::isa::{Alloc, Instr, Jmp, Jnz, Jz, Lds8, Lds32, Lds64, Push32, Sts8, Sts32, Sts64};
-use crate::marshal::TypeLayout;
 use crate::{ByteOrder, FrameSize, Layout, Program, Region, Width};
 
 #[cfg(test)]
@@ -74,6 +73,8 @@ pub struct Resolved {
     frame: FrameSize,
     /// The region-base pushes whose immediate the layout still owes.
     relocs: Vec<BaseReloc>,
+    /// The field-offset pushes whose immediate a layout still owes.
+    field_relocs: Vec<FieldReloc>,
     /// The branches and where each block starts, kept so an encoder that changes
     /// instruction sizes can recompute the offsets against its own measurements.
     patches: Vec<Patch>,
@@ -96,6 +97,11 @@ impl Resolved {
     pub fn relocs(&self) -> &[BaseReloc] {
         &self.relocs
     }
+
+    /// The field-offset relocations, each naming an instruction and its hole.
+    pub fn field_relocs(&self) -> &[FieldReloc] {
+        &self.field_relocs
+    }
 }
 
 /// A region-base push whose immediate is filled in once a layout is chosen.
@@ -105,6 +111,15 @@ pub struct BaseReloc {
     pub index: usize,
     /// The region whose base it wants.
     pub region: Region,
+}
+
+/// A field-offset push whose immediate is filled in from an aggregate's layout.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FieldReloc {
+    /// Index of the push in [`Resolved::code`].
+    pub index: usize,
+    /// Names the hole; what it resolves to lives outside the graph.
+    pub hole: u32,
 }
 
 /// Validates a graph and resolves it to instructions, without a byte order.
@@ -120,6 +135,7 @@ pub fn resolve(cfg: &Cfg) -> Result<Resolved, NotFinal> {
         patches,
         starts,
         relocs,
+        field_relocs,
     } = emit(cfg, &order)?;
 
     // Branch offsets, computed against the standard packed sizes. Order does not
@@ -133,6 +149,7 @@ pub fn resolve(cfg: &Cfg) -> Result<Resolved, NotFinal> {
         code,
         frame: cfg.frame().size(),
         relocs,
+        field_relocs,
         patches,
         starts,
     })
@@ -154,6 +171,13 @@ pub fn assemble_with<E: Encoder + Clone + 'static>(
     encoder: &E,
 ) -> Result<Artifact<E::Order>, NotFinal> {
     let resolved = resolve(cfg)?;
+
+    // Field offsets need an aggregate's layout, which this path does not carry;
+    // only an assembler that knows the type can resolve them.
+    if !resolved.field_relocs.is_empty() {
+        return Err(NotFinal::FieldWithoutLayout);
+    }
+
     let mut code = resolved.code;
 
     // Byte offset of every instruction, plus one past the last, measured by this
@@ -304,26 +328,6 @@ impl Reloc {
             copy_reencoded(&tmp, slice)
         })
     }
-
-    /// A field-offset relocation: re-encode `Push32 { imm: offset }` in order
-    /// `B`, where `offset` is where `path` sits in `layout`. Fails at finalize
-    /// if `path` names no field.
-    pub fn field_offset<B: ByteOrder>(
-        at: usize,
-        layout: &'static TypeLayout,
-        path: &'static [&'static str],
-    ) -> Self {
-        Self::new(at, PUSH32_LEN, move |_, slice| {
-            let offset = layout
-                .offset_of(path)
-                .ok_or_else(|| NotFinal::UnknownField {
-                    path: path.join("."),
-                })?;
-            let mut tmp = Vec::new();
-            encode::<B>(Push32 { imm: offset }.into(), &mut tmp).map_err(NotFinal::encode)?;
-            copy_reencoded(&tmp, slice)
-        })
-    }
 }
 
 impl core::fmt::Debug for Reloc {
@@ -396,6 +400,8 @@ struct Emitted {
     starts: Vec<usize>,
     /// The region-base pushes left as placeholders.
     relocs: Vec<BaseReloc>,
+    /// The field-offset holes left as placeholders.
+    field_relocs: Vec<FieldReloc>,
 }
 
 /// A branch whose offset is not known until every instruction has been measured.
@@ -434,6 +440,7 @@ fn emit(cfg: &Cfg, order: &[BlockId]) -> Result<Emitted, NotFinal> {
     let mut code = Vec::new();
     let mut patches = Vec::new();
     let mut relocs = Vec::new();
+    let mut field_relocs = Vec::new();
     let mut starts = vec![0; cfg.blocks().len()];
 
     // The prologue, reserving the frame the whole graph shares. There is no
@@ -459,11 +466,16 @@ fn emit(cfg: &Cfg, order: &[BlockId]) -> Result<Emitted, NotFinal> {
             // A region base is the one thing layout still owes: emit a placeholder
             // and record where it sits, rather than reading an address that does
             // not exist yet.
-            if let Item::Base(region) = *item {
-                relocs.push(BaseReloc {
+            match *item {
+                Item::Base(region) => relocs.push(BaseReloc {
                     index: code.len(),
                     region,
-                });
+                }),
+                Item::Field(hole) => field_relocs.push(FieldReloc {
+                    index: code.len(),
+                    hole,
+                }),
+                _ => {}
             }
 
             code.push(materialize(frame, *item, depth, at)?);
@@ -509,6 +521,7 @@ fn emit(cfg: &Cfg, order: &[BlockId]) -> Result<Emitted, NotFinal> {
         patches,
         starts,
         relocs,
+        field_relocs,
     })
 }
 
@@ -565,8 +578,8 @@ fn patch_branches(
 fn materialize(frame: &Frame, item: Item, depth: u32, at: Where) -> Result<Instr, NotFinal> {
     let (cell, storing) = match item {
         Item::Instr(instr) => return Ok(instr),
-        // The address arrives at finalize; a zero holds its place until then.
-        Item::Base(_) => return Ok(Push32 { imm: 0 }.into()),
+        // The address or offset arrives at finalize; a zero holds its place.
+        Item::Base(_) | Item::Field(_) => return Ok(Push32 { imm: 0 }.into()),
         Item::Load(cell) => (cell, false),
         Item::Store(cell) => (cell, true),
     };
@@ -642,12 +655,9 @@ pub enum NotFinal {
         written: usize,
     },
 
-    /// A field path names no field in the layout it was resolved against.
-    #[error("no field `{path}` in the layout")]
-    UnknownField {
-        /// The dotted path that did not resolve.
-        path: String,
-    },
+    /// A field-offset hole reached this path, which has no layout to resolve it.
+    #[error("a field offset can only be resolved with the aggregate's layout")]
+    FieldWithoutLayout,
 
     /// An instruction would not encode.
     #[error("could not encode an instruction: {0}")]
