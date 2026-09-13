@@ -30,6 +30,7 @@ use musli::options::{self, ByteOrder as MusliOrder, Integer, Options};
 use musli::storage::{Encoding, Error as WireError};
 use musli::{Context, Writer};
 
+use crate::isa::Push32;
 use crate::{ByteOrder, Instr};
 
 #[cfg(test)]
@@ -121,6 +122,65 @@ pub fn encode_all<B: ByteOrder>(
 pub fn encoded_len(instr: Instr) -> Result<usize, EncodeError> {
     let mut counter = Counter(0);
     Ok(LE_WIRE.encode(&mut counter, &instr)?)
+}
+
+/// Where an instruction's fixed-width immediate lands in its encoding.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Immediate {
+    /// Byte offset of the immediate within the encoded instruction.
+    pub at: usize,
+    /// Its width in bytes.
+    pub width: usize,
+    /// Whether the most significant byte comes first.
+    pub big_endian: bool,
+}
+
+/// Probes `encoder` for where a `push32`'s immediate sits and how it is ordered.
+///
+/// Derived rather than assumed, so a linker can patch the immediate without
+/// baking in the wire format. `None` if the encoder does not lay a `push32` out
+/// as a contiguous fixed-width immediate.
+pub fn push32_immediate<E: Encoder>(encoder: &E) -> Option<Immediate> {
+    let probe = |imm: u32| {
+        let mut out = Vec::new();
+        encoder.encode(Push32 { imm }.into(), &mut out).ok()?;
+        Some(out)
+    };
+
+    let base = probe(0)?;
+    let full = probe(u32::MAX)?;
+    let one = probe(1)?;
+    if base.len() != full.len() || base.len() != one.len() {
+        return None;
+    }
+
+    // The immediate is where flipping every bit changed a byte; its low byte is
+    // where a value of one landed.
+    let mut at = None;
+    let mut width = 0;
+    let mut low = None;
+    for i in 0..base.len() {
+        if base.get(i) != full.get(i) {
+            at.get_or_insert(i);
+            width += 1;
+        }
+        if base.get(i) != one.get(i) {
+            if low.is_some() {
+                return None;
+            }
+            low = Some(i);
+        }
+    }
+
+    let (at, low) = (at?, low?);
+    if width == 0 || low < at || low >= at + width {
+        return None;
+    }
+    Some(Immediate {
+        at,
+        width,
+        big_endian: low == at + width - 1,
+    })
 }
 
 /// Decodes the instruction at the start of `code`, returning it and the number

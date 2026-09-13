@@ -20,6 +20,7 @@ mod value;
 mod width;
 
 pub use byte_order::{Be, ByteOrder, Le};
+pub use encoding::{Immediate, push32_immediate};
 pub use image::{Image, Layout, Region};
 pub use ir::{Artifact, Reloc};
 pub use isa::{FrameSize, Instr, Op};

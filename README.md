@@ -53,7 +53,7 @@ cannot settle on its own:
 fn program() -> Artifact<Le> {
     // link_fields bakes any $field offsets into the bytes at compile time;
     // this program has none, so it is handed an empty patch list.
-    const CODE: &[u8] = &::safetynet::link_fields::<Le, 15>(
+    const CODE: &[u8] = &::safetynet::link_fields::<15>(
         [
             5u8, 8u8, 0u8,              // alloc 8      — frame prologue
             2u8, 0u8, 0u8, 0u8, 0u8,    // push32 0     — .input base placeholder

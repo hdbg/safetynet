@@ -9,7 +9,7 @@
 
 use proc_macro2::{Literal, TokenStream};
 use quote::quote;
-use safetynet_core::encoding::encode;
+use safetynet_core::encoding::{Packed, encode, push32_immediate};
 use safetynet_core::ir::resolve;
 use safetynet_core::{Be, Le, Region};
 use syn::Path;
@@ -67,9 +67,21 @@ pub(crate) fn emit(order: &Path, lowered: &Lowered) -> syn::Result<TokenStream> 
         });
     }
 
+    // Where a push32's immediate lands and how it is ordered, probed from the
+    // very encoder that wrote the bytes above — the linker patches into that
+    // rather than assuming a shape.
+    let immediate = match which {
+        Order::Le => push32_immediate(&Packed::<Le>::new()),
+        Order::Be => push32_immediate(&Packed::<Be>::new()),
+    }
+    .ok_or_else(|| syn::Error::new(order.span(), "the encoder has no push32 immediate to patch"))?;
+    let width = Literal::usize_suffixed(immediate.width);
+    let big_endian = immediate.big_endian;
+
     let mut patches = Vec::new();
     for reloc in resolved.field_relocs() {
-        let at = byte_at(reloc.index);
+        let push_at = offsets.get(reloc.index).copied().unwrap_or_default();
+        let at = Literal::usize_suffixed(push_at + immediate.at);
         let field = lowered.field_refs.get(reloc.hole as usize).ok_or_else(|| {
             syn::Error::new(
                 order.span(),
@@ -84,6 +96,8 @@ pub(crate) fn emit(order: &Path, lowered: &Lowered) -> syn::Result<TokenStream> 
         patches.push(quote! {
             ::safetynet::FieldPatch {
                 at: #at,
+                width: #width,
+                big_endian: #big_endian,
                 layout: <#ty as ::safetynet::VmLayout>::LAYOUT,
                 path: &[#(#names),*],
             }
@@ -92,7 +106,7 @@ pub(crate) fn emit(order: &Path, lowered: &Lowered) -> syn::Result<TokenStream> 
 
     Ok(quote! {
         {
-            const CODE: &[u8] = &::safetynet::link_fields::<#order, #len>(
+            const CODE: &[u8] = &::safetynet::link_fields::<#len>(
                 [#(#raw),*],
                 &[#(#patches),*],
             );
