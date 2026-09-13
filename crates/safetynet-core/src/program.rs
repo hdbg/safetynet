@@ -14,8 +14,13 @@ pub struct Program<B: ByteOrder> {
 }
 
 impl<B: ByteOrder> Program<B> {
-    /// Wraps finalized bytecode.
-    pub(crate) const fn new(code: Vec<u8>, frame: FrameSize) -> Self {
+    /// Wraps bytecode.
+    ///
+    /// Public because finalization is not the only thing that produces a
+    /// program: a hand-written assembler is a legitimate front-end, and one that
+    /// had to go through a graph to hand the machine some bytes would be a
+    /// worse tool, not a safer one.
+    pub const fn new(code: Vec<u8>, frame: FrameSize) -> Self {
         Self {
             code,
             frame,

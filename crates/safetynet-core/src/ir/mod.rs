@@ -24,13 +24,11 @@ pub use finalize::{NotFinal, finalize, finalize_with};
 pub use frame::{Cell, CellId, Frame};
 pub use validate::{Invalid, Limits, Where, validate, validate_with};
 
-use crate::{Instr, WORD_SIZE};
+use crate::isa::{Lds64, Push32, Sts64};
+use crate::{Instr, Op, Region};
 
 #[cfg(test)]
 mod tests;
-
-/// Stack effect of one word, as a signed byte count.
-const WORD: i32 = WORD_SIZE as i32;
 
 /// Identifies a block within one [`Cfg`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -57,6 +55,12 @@ pub enum Item {
     Load(CellId),
     /// Pop a word into a frame cell, keeping as many low bytes as it holds.
     Store(CellId),
+    /// Push the address a region begins at.
+    ///
+    /// Symbolic for the same reason a cell is: where a region sits is decided
+    /// when the image is laid out, and a program that baked the number in would
+    /// have to be rebuilt every time anything before it changed size.
+    Base(Region),
 }
 
 impl Item {
@@ -65,11 +69,16 @@ impl Item {
     /// The symbolic forms know their effect without knowing their displacement,
     /// which is exactly what lets the stack depth be validated before anything
     /// is laid out — and the displacement is computed *from* that depth.
+    /// Asks the instruction each form stands for rather than restating a
+    /// number, so the effect cannot go stale if the instruction's ever changes.
+    /// The operands are placeholders: a stack effect is a property of the
+    /// opcode, never of what it carries.
     pub fn sp_delta(self) -> i32 {
         match self {
             Self::Instr(instr) => instr.sp_delta(),
-            Self::Load(_) => WORD,
-            Self::Store(_) => -WORD,
+            Self::Load(_) => Lds64 { disp: 0 }.sp_delta(),
+            Self::Store(_) => Sts64 { disp: 0 }.sp_delta(),
+            Self::Base(_) => Push32 { imm: 0 }.sp_delta(),
         }
     }
 }
@@ -111,8 +120,8 @@ impl Terminator {
     /// branch on.
     pub fn sp_delta(&self) -> i32 {
         match self {
-            Self::Jmp(_) | Self::Halt => 0,
-            Self::Br { .. } | Self::Switch { .. } => -WORD,
+            Self::Jmp(_) | Self::Halt => crate::isa::Jmp { offset: 0 }.sp_delta(),
+            Self::Br { .. } | Self::Switch { .. } => crate::isa::Jz { offset: 0 }.sp_delta(),
         }
     }
 

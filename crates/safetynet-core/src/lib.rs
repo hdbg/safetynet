@@ -7,6 +7,7 @@
 
 pub mod byte_order;
 pub mod encoding;
+pub mod image;
 pub mod ir;
 pub mod isa;
 pub mod program;
@@ -15,6 +16,7 @@ pub mod vm;
 mod width;
 
 pub use byte_order::{Be, ByteOrder, Le};
+pub use image::{Image, Layout, Region};
 pub use isa::{FrameSize, Instr, Op};
 pub use program::Program;
 pub use vm::{Flow, Trap, Vm};

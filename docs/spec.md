@@ -403,32 +403,58 @@ later, because every pass written against `Load(cell)` has to be revisited.
 ### 6.1 Image map
 
 ```
-.rodata    literals, const tables, S-boxes                (immutable image)
-.input     marshalled input aggregate(s), per VmLayout         (UNTRUSTED)
-.ret       return slot / marshalled return aggregate
-.scratch   work area, output buffers
+.input     what the host wrote, sized by the caller           (UNTRUSTED)
+.scratch   the program's workspace, sized by the program
 .stack     frame + operand stack, grows upward; SP bound-checked to its end
 ```
 
+Two more are specified and **not yet present**, because neither has anything
+that produces it. `.rodata` (literals, const tables, S-boxes) arrives when a
+program can *have* a constant — which means bytes carried on `Program<B>` and
+placed by the image builder, not a region to reserve now. `.ret` (the marshalled
+return slot) arrives with marshalling; until then a program's result is the word
+on top of the stack when it halts. Reserving either early buys nothing precisely
+*because* bases are computed: adding a region later shifts what follows it and
+breaks nothing, since both sides read the layout.
+
+What separates the three that exist is **who sizes a region and who writes it**.
+`.input` is sized by the caller's types and filled by the host; `.scratch` is
+sized by the program and never touched from outside. Merging them would mean one
+number computed from two unrelated sources, and a host needing an offset *within*
+the merged region to know where to put arguments — which is regions again, one
+level down and undocumented.
+
 **The order of the regions is fixed; the addresses are not.** Bases are computed
-per program from the sizes the build actually needs and recorded in
-`Program<B>`, which is what the interpreter bounds-checks against. Hard-coding
-`.rodata` at `0x0000` and `.input` at `0x0800` would cap a const table at 2 KiB
-for no reason and pad every small program to the same size; a computed layout
-costs one struct of `u32`s and removes a whole class of "the S-box grew" bug.
-Sizes are known at finalization, so nothing about this is dynamic.
+per program from the sizes the build actually needs, recorded in a `Layout`, and
+read by *both* sides: the host writes `.input` through it and finalization
+resolves a symbolic `Base(region)` through it, so an address is never a constant
+two places have to keep agreeing on. Hard-coding `.input` at `0x0000` and
+`.scratch` at `0x0800` would cap either for no reason and pad every small program
+to the same size; a computed layout costs one struct of `u32`s and removes a
+whole class of "the buffer grew" bug. Sizes are known at finalization, so nothing
+about this is dynamic.
 
 One address space, not two: `.stack` is a region like any other, `LD*`/`ST*` can
 address it with an absolute address, and `LDS`/`STS` are the SP-relative form of
 the same access (§3.1). Nothing on the stack is a return address — there are no
 calls — so the aliasing is harmless, and the interpreter gets one bounds check
-instead of two.
+instead of two. `SP` is the one thing that *is* confined: it is bounded to
+`.stack` in both directions, which is the check that replaced an absolutely
+indexed locals array's implicit in-range indexing.
 
-The host marshals inputs into `.input`, runs to `HALT`, then reads `.ret` via
-`unmarshal`. Everything crossing the boundary is `VmValue`/`VmLayout`. The image
-is built by `Image<B>` and consumed by `Vm<B>` with the same `B` that both
-marshal directions use, so the boundary has exactly one byte order by
-construction.
+`.scratch` also carries weight it should not have to. It is currently the only
+place a program can keep something it addresses absolutely, because nothing can
+take the address of a frame local (§5); once `LEA` exists, a frame array sized to
+what the program needs is the better answer and `.scratch` is for what genuinely
+outlives a frame.
+
+The host marshals inputs into `.input`, runs to `HALT`, then reads the result.
+Everything crossing the boundary will be `VmValue`/`VmLayout`; until that exists
+the host writes bytes into a region and takes the word off the top of the stack.
+The image is built by `Image` and consumed by `Vm<B>`. `Image` becomes `Image<B>`
+when marshalling gives it typed contents — that is the first thing in it whose
+bytes depend on the order — and from then on the boundary has exactly one byte
+order by construction.
 
 ### 6.2 Deferred resolution — the central mechanism
 

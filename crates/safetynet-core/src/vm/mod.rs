@@ -26,6 +26,7 @@
 use core::fmt;
 use core::marker::PhantomData;
 
+use crate::image::{Image, Layout, Region};
 use crate::{ByteOrder, FrameSize, Instr, WORD_SIZE, Width, Word};
 
 mod run;
@@ -143,31 +144,31 @@ pub enum Trap {
 /// wrong answer.
 pub struct Vm<B: ByteOrder> {
     memory: Vec<u8>,
-    stack_base: usize,
+    layout: Layout,
+    stack: core::ops::Range<usize>,
     sp: usize,
     order: PhantomData<B>,
 }
 
 impl<B: ByteOrder> Vm<B> {
-    /// Builds a machine over `memory`, with an empty stack based at
-    /// `stack_base`.
+    /// Builds a machine over an image, with an empty stack.
     ///
-    /// Returns `None` unless `stack_base` is word-aligned and inside `memory`.
-    /// An unaligned base would leave `SP` unaligned for the whole run, which
-    /// costs nothing here but makes every frame displacement off by the
-    /// remainder; it is rejected where it can still be a clear error.
-    ///
-    /// Bytes below `stack_base` are still addressable by `LD*`/`ST*`; that is
-    /// where an image's constants and marshalled input live.
+    /// Everything outside `.stack` is still addressable by `LD*`/`ST*` — there
+    /// is one address space, and the regions are a convention about who owns
+    /// what. `SP` is the exception: it is bounded to `.stack` in both
+    /// directions, which is the check that replaced an absolutely-indexed locals
+    /// array's implicit in-range indexing.
     ///
     /// # Examples
     ///
     /// ```
+    /// use safetynet_core::image::{Image, Layout, Sizes};
     /// use safetynet_core::isa::{Add, Push8};
     /// use safetynet_core::vm::{Flow, Vm};
     /// use safetynet_core::Le;
     ///
-    /// let mut vm = Vm::<Le>::new(vec![0; 64], 0).expect("a valid stack");
+    /// let layout = Layout::new(Sizes { stack: 64, ..Sizes::default() }).expect("fits");
+    /// let mut vm = Vm::<Le>::new(Image::new(layout));
     ///
     /// vm.step(Push8 { imm: 2 }.into())?;
     /// vm.step(Push8 { imm: 40 }.into())?;
@@ -176,17 +177,29 @@ impl<B: ByteOrder> Vm<B> {
     /// assert_eq!(vm.pop()?, 42);
     /// # Ok::<_, safetynet_core::vm::Trap>(())
     /// ```
-    pub fn new(memory: Vec<u8>, stack_base: usize) -> Option<Self> {
-        if stack_base > memory.len() || !stack_base.is_multiple_of(WORD_SIZE) {
-            return None;
-        }
+    pub fn new(image: Image) -> Self {
+        let layout = *image.layout();
+        let stack = layout.span(Region::Stack).range();
 
-        Some(Self {
-            memory,
-            stack_base,
-            sp: stack_base,
+        Self {
+            memory: image.into_memory(),
+            layout,
+            sp: stack.start,
+            stack,
             order: PhantomData,
-        })
+        }
+    }
+
+    /// Where every region of this machine's address space lives.
+    pub const fn layout(&self) -> &Layout {
+        &self.layout
+    }
+
+    /// The bytes of one region, for a host reading a result back out.
+    pub fn region(&self, region: Region) -> &[u8] {
+        self.memory
+            .get(self.layout.span(region).range())
+            .unwrap_or_default()
     }
 
     /// Executes one instruction and reports where control goes next.
@@ -215,6 +228,10 @@ impl<B: ByteOrder> Vm<B> {
     /// Pushes a word, growing the stack by [`WORD_SIZE`] bytes.
     pub fn push(&mut self, value: Word) -> Result<(), Trap> {
         let top = self.sp.checked_add(WORD_SIZE).ok_or(Trap::StackOverflow)?;
+        if top > self.stack.end {
+            return Err(Trap::StackOverflow);
+        }
+
         let slot = self
             .memory
             .get_mut(self.sp..top)
@@ -228,7 +245,7 @@ impl<B: ByteOrder> Vm<B> {
     /// Pops a word, shrinking the stack by [`WORD_SIZE`] bytes.
     pub fn pop(&mut self) -> Result<Word, Trap> {
         let bottom = self.sp.checked_sub(WORD_SIZE).ok_or(Trap::StackUnderflow)?;
-        if bottom < self.stack_base {
+        if bottom < self.stack.start {
             return Err(Trap::StackUnderflow);
         }
 
@@ -263,7 +280,7 @@ impl<B: ByteOrder> Vm<B> {
             .checked_add(usize::from(n.bytes()))
             .ok_or(Trap::StackOverflow)?;
 
-        if top > self.memory.len() {
+        if top > self.stack.end {
             return Err(Trap::StackOverflow);
         }
 
@@ -278,7 +295,7 @@ impl<B: ByteOrder> Vm<B> {
             .checked_sub(usize::from(n.bytes()))
             .ok_or(Trap::StackUnderflow)?;
 
-        if bottom < self.stack_base {
+        if bottom < self.stack.start {
             return Err(Trap::StackUnderflow);
         }
 
@@ -396,7 +413,7 @@ impl<B: ByteOrder> Vm<B> {
             .checked_sub(usize::from(disp))
             .ok_or(Trap::StackUnderflow)?;
 
-        if cell < self.stack_base {
+        if cell < self.stack.start {
             return Err(Trap::StackUnderflow);
         }
 
@@ -460,7 +477,7 @@ impl<B: ByteOrder> fmt::Debug for Vm<B> {
         f.debug_struct("Vm")
             .field("order", &B::NAME)
             .field("memory", &self.memory.len())
-            .field("stack_base", &self.stack_base)
+            .field("stack", &self.stack)
             .field("sp", &self.sp)
             .finish()
     }

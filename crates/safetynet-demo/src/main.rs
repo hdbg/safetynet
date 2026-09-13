@@ -14,17 +14,14 @@ use std::error::Error;
 use std::fmt::Write as _;
 
 use safetynet::encoding::{encode, encoded_len};
+use safetynet::image::{Image, Layout, Region, Sizes};
 use safetynet::isa::{
-    Add, Alloc, CmpEq, FrameSize, Halt, Jmp, Jnz, Ld8, Lds64, Push8, Push64, St8, Sts64, Xor,
+    Add, Alloc, CmpEq, FrameSize, Halt, Jmp, Jnz, Ld8, Lds64, Push8, Push32, St8, Sts64, Xor,
 };
-use safetynet::{ByteOrder, Instr, Order, Vm, Word};
+use safetynet::{ByteOrder, Instr, Order, Program, Vm, Word};
 
-/// Where the buffer sits in the VM's address space.
-const DATA: usize = 0x40;
-/// Base of the stack, above the buffer and word-aligned.
-const STACK_BASE: usize = 0x100;
-/// Size of the whole address space.
-const MEMORY: usize = 0x200;
+/// Room for the stack: the frame, plus the few words the loop keeps live.
+const STACK: u32 = 256;
 /// Enough for the prologue plus nineteen instructions per byte, with room over.
 const FUEL: u64 = 10_000;
 /// The cipher key. One byte, applied to every byte of the buffer.
@@ -79,18 +76,20 @@ fn op(instr: impl Into<Instr>) -> Line {
     Line::Op(instr.into())
 }
 
-/// The cipher, as lines: XOR every byte of the buffer with [`KEY`] in place,
+/// The cipher, as lines: XOR every byte of `.input` with [`KEY`] in place,
 /// accumulating a checksum of what was written.
-fn program(len: usize) -> Result<Vec<Line>, Box<dyn Error>> {
+///
+/// Takes the layout rather than a constant. The buffer's address is whatever the
+/// image put it at, and the host reads it from the same place — so there is no
+/// number here that someone has to remember to change twice.
+fn program(layout: &Layout) -> Result<Vec<Line>, Box<dyn Error>> {
     let frame = FrameSize::new(FRAME).ok_or("the frame must be word-aligned")?;
-    let end = Word::try_from(DATA + len)?;
+    let buffer = layout.span(Region::Input);
 
     // Prologue: reserve the frame, point the cursor at the buffer, zero the sum.
     let mut lines = vec![
         op(Alloc { n: frame }),
-        op(Push64 {
-            imm: Word::try_from(DATA)?,
-        }),
+        op(Push32 { imm: buffer.base() }),
         op(Sts64 {
             disp: cell(CURSOR, 8),
         }),
@@ -104,7 +103,7 @@ fn program(len: usize) -> Result<Vec<Line>, Box<dyn Error>> {
         op(Lds64 {
             disp: cell(CURSOR, 0),
         }),
-        op(Push64 { imm: end }),
+        op(Push32 { imm: buffer.end() }),
         op(CmpEq),
     ]);
     let exit = lines.len();
@@ -156,13 +155,13 @@ fn program(len: usize) -> Result<Vec<Line>, Box<dyn Error>> {
     Ok(lines)
 }
 
-/// Assembles lines into bytecode, resolving each branch against real encoded
+/// Assembles lines into a program, resolving each branch against real encoded
 /// sizes.
 ///
 /// One pass is enough: an operand's width is fixed by its opcode, so a branch's
 /// size never depends on the offset it ends up carrying. That is also why the
 /// offsets can be measured with a placeholder in the branch.
-fn assemble<B: ByteOrder>(lines: &[Line]) -> Result<Vec<u8>, Box<dyn Error>> {
+fn assemble<B: ByteOrder>(lines: &[Line], frame: FrameSize) -> Result<Program<B>, Box<dyn Error>> {
     let mut offsets = Vec::with_capacity(lines.len() + 1);
     let mut at = 0;
     for line in lines {
@@ -193,28 +192,38 @@ fn assemble<B: ByteOrder>(lines: &[Line]) -> Result<Vec<u8>, Box<dyn Error>> {
         encode::<B>(line.instruction(offset), &mut code)?;
     }
 
-    Ok(code)
+    Ok(Program::new(code, frame))
 }
 
-/// Runs the cipher over `input`, returning what it left in memory and the
+/// The image this cipher runs in: an `.input` region the size of the message,
+/// and a stack.
+fn image_layout(len: usize) -> Result<Layout, Box<dyn Error>> {
+    Layout::new(Sizes {
+        input: u32::try_from(len)?,
+        stack: STACK,
+        ..Sizes::default()
+    })
+    .ok_or_else(|| "the image does not fit".into())
+}
+
+/// Runs the cipher over `input`, returning what it left in `.input` and the
 /// checksum it left on the stack.
-fn cipher<B: ByteOrder>(code: &[u8], input: &[u8]) -> Result<(Vec<u8>, Word), Box<dyn Error>> {
-    let buffer = DATA..DATA + input.len();
+fn cipher<B: ByteOrder>(
+    program: &Program<B>,
+    layout: Layout,
+    input: &[u8],
+) -> Result<(Vec<u8>, Word), Box<dyn Error>> {
+    let mut image = Image::new(layout);
+    image
+        .write(Region::Input, input)
+        .ok_or("the message does not fit in .input")?;
 
-    let mut memory = vec![0; MEMORY];
-    memory
-        .get_mut(buffer.clone())
-        .ok_or("the buffer does not fit in the address space")?
-        .copy_from_slice(input);
+    let mut vm = Vm::<B>::new(image).run(program, FUEL)?;
 
-    let vm = Vm::<B>::new(memory, STACK_BASE).ok_or("unusable stack base")?;
-    let mut vm = vm.run(code, FUEL)?;
-
-    // The result is the word on top of the stack when the program halted.
+    // The result is the word on top of the stack when the program halted; what
+    // the cipher wrote is in the region it was pointed at.
     let checksum = vm.pop()?;
-    let output = vm.memory().get(buffer).ok_or("the buffer moved")?.to_vec();
-
-    Ok((output, checksum))
+    Ok((vm.region(Region::Input).to_vec(), checksum))
 }
 
 /// Lowercase hex, for showing bytes that are not text any more.
@@ -227,12 +236,20 @@ fn hex(bytes: &[u8]) -> String {
 
 fn main() -> Result<(), Box<dyn Error>> {
     let plaintext: &[u8] = b"attack at dawn";
-    let code = assemble::<Order>(&program(plaintext.len())?)?;
+    let layout = image_layout(plaintext.len())?;
+    let lines = program(&layout)?;
+    let program = assemble::<Order>(&lines, FrameSize::new(FRAME).ok_or("word-aligned")?)?;
 
     println!(
         "safetynet demo — xor cipher, {} bytes of bytecode, byte order {}",
-        code.len(),
+        program.code().len(),
         <Order as ByteOrder>::NAME
+    );
+    println!(
+        "image       .input at {:#x}, {} bytes; .stack at {:#x}",
+        layout.span(Region::Input).base(),
+        layout.span(Region::Input).len(),
+        layout.span(Region::Stack).base(),
     );
     println!("key         {KEY:#04x}");
     println!(
@@ -241,10 +258,10 @@ fn main() -> Result<(), Box<dyn Error>> {
         String::from_utf8_lossy(plaintext)
     );
 
-    let (ciphertext, checksum) = cipher::<Order>(&code, plaintext)?;
+    let (ciphertext, checksum) = cipher::<Order>(&program, layout, plaintext)?;
     println!("ciphertext  {}  checksum {checksum:#x}", hex(&ciphertext));
 
-    let (decrypted, _) = cipher::<Order>(&code, &ciphertext)?;
+    let (decrypted, _) = cipher::<Order>(&program, layout, &ciphertext)?;
     println!(
         "decrypted   {}  {}",
         hex(&decrypted),
@@ -266,14 +283,23 @@ mod tests {
 
     /// The whole stack, end to end: assemble, run, read the buffer back out.
     /// XOR is an involution, so the program is its own decryptor.
+    /// Assembles the cipher for a message of `len` bytes.
+    fn build<B: ByteOrder>(len: usize) -> (Program<B>, Layout) {
+        let layout = image_layout(len).expect("an image");
+        let lines = program(&layout).expect("a program");
+        let frame = FrameSize::new(FRAME).expect("word-aligned");
+
+        (assemble::<B>(&lines, frame).expect("assembles"), layout)
+    }
+
     fn the_cipher_is_its_own_inverse<B: ByteOrder>() {
         let plaintext: &[u8] = b"attack at dawn";
-        let code = assemble::<B>(&program(plaintext.len()).expect("a program")).expect("assembles");
+        let (program, layout) = build::<B>(plaintext.len());
 
-        let (ciphertext, _) = cipher::<B>(&code, plaintext).expect("encrypts");
+        let (ciphertext, _) = cipher::<B>(&program, layout, plaintext).expect("encrypts");
         assert_ne!(ciphertext, plaintext, "the key did nothing");
 
-        let (decrypted, _) = cipher::<B>(&code, &ciphertext).expect("decrypts");
+        let (decrypted, _) = cipher::<B>(&program, layout, &ciphertext).expect("decrypts");
         assert_eq!(decrypted, plaintext);
     }
 
@@ -292,10 +318,10 @@ mod tests {
     #[test]
     fn the_result_is_the_checksum_of_what_was_written() {
         let plaintext: &[u8] = b"attack at dawn";
-        let code =
-            assemble::<Order>(&program(plaintext.len()).expect("a program")).expect("assembles");
+        let (program, layout) = build::<Order>(plaintext.len());
 
-        let (ciphertext, checksum) = cipher::<Order>(&code, plaintext).expect("encrypts");
+        let (ciphertext, checksum) =
+            cipher::<Order>(&program, layout, plaintext).expect("encrypts");
         let expected: Word = ciphertext.iter().map(|byte| Word::from(*byte)).sum();
 
         assert_eq!(checksum, expected);
@@ -306,14 +332,24 @@ mod tests {
     #[test]
     fn the_orders_agree_on_the_output() {
         let plaintext: &[u8] = b"attack at dawn";
-        let lines = program(plaintext.len()).expect("a program");
-
-        let little = cipher::<Le>(&assemble::<Le>(&lines).expect("assembles"), plaintext);
-        let big = cipher::<Be>(&assemble::<Be>(&lines).expect("assembles"), plaintext);
+        let (little, layout) = build::<Le>(plaintext.len());
+        let (big, _) = build::<Be>(plaintext.len());
 
         assert_eq!(
-            little.expect("little-endian run").0,
-            big.expect("big-endian run").0
+            cipher::<Le>(&little, layout, plaintext)
+                .expect("little-endian")
+                .0,
+            cipher::<Be>(&big, layout, plaintext).expect("big-endian").0,
         );
+    }
+
+    /// Moving a region moves the address the program pushes, with nothing in the
+    /// source to keep in step.
+    #[test]
+    fn the_program_follows_the_layout() {
+        let (short, _) = build::<Order>(4);
+        let (long, _) = build::<Order>(4096);
+
+        assert_ne!(short.code(), long.code(), "different end, same shape");
     }
 }

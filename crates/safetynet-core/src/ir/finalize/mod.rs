@@ -14,15 +14,15 @@
 use super::{Block, BlockId, Cfg, Item, Terminator, Where, validate};
 use crate::encoding::{Encoder, Packed};
 use crate::ir::{Frame, Invalid};
-use crate::isa::{Alloc, Instr, Jmp, Jnz, Jz, Lds8, Lds32, Lds64, Sts8, Sts32, Sts64};
-use crate::{ByteOrder, Program, Width};
+use crate::isa::{Alloc, Instr, Jmp, Jnz, Jz, Lds8, Lds32, Lds64, Push32, Sts8, Sts32, Sts64};
+use crate::{ByteOrder, Layout, Program, Width};
 
 #[cfg(test)]
 mod tests;
 
 /// Lowers a validated graph to bytecode in the standard encoding.
-pub fn finalize<B: ByteOrder>(cfg: &Cfg) -> Result<Program<B>, NotFinal> {
-    finalize_with(cfg, &Packed::<B>::new())
+pub fn finalize<B: ByteOrder>(cfg: &Cfg, layout: &Layout) -> Result<Program<B>, NotFinal> {
+    finalize_with(cfg, layout, &Packed::<B>::new())
 }
 
 /// Lowers a validated graph to bytecode, using `encoder` to measure and write.
@@ -34,15 +34,19 @@ pub fn finalize<B: ByteOrder>(cfg: &Cfg) -> Result<Program<B>, NotFinal> {
 /// Validation runs first rather than being assumed. A graph reaching here has
 /// been through whatever passes were applied to it, and the invariant every
 /// displacement below depends on has to hold *now*, not when it was built.
-pub fn finalize_with<E: Encoder>(cfg: &Cfg, encoder: &E) -> Result<Program<E::Order>, NotFinal> {
+pub fn finalize_with<E: Encoder>(
+    cfg: &Cfg,
+    layout: &Layout,
+    encoder: &E,
+) -> Result<Program<E::Order>, NotFinal> {
     validate(cfg)?;
 
-    let order = layout(cfg);
+    let order = block_order(cfg);
     let Emitted {
         mut code,
         patches,
         starts,
-    } = emit(cfg, &order)?;
+    } = emit(cfg, layout, &order)?;
 
     // Byte offset of every instruction, plus one past the last, so a branch can
     // ask where the instruction after it begins.
@@ -94,7 +98,7 @@ pub fn finalize_with<E: Encoder>(cfg: &Cfg, encoder: &E) -> Result<Program<E::Or
 /// choice — it decides which edges become fallthroughs and cost nothing — but a
 /// deterministic order matters more than a clever one while the graph is small,
 /// and a reordering pass belongs with the other mutations.
-fn layout(cfg: &Cfg) -> Vec<BlockId> {
+fn block_order(cfg: &Cfg) -> Vec<BlockId> {
     let entry = cfg.entry();
     core::iter::once(entry)
         .chain(cfg.blocks().iter().map(Block::id).filter(|id| *id != entry))
@@ -141,7 +145,7 @@ impl Branch {
 }
 
 /// Builds the instruction stream, with branch offsets left for the caller.
-fn emit(cfg: &Cfg, order: &[BlockId]) -> Result<Emitted, NotFinal> {
+fn emit(cfg: &Cfg, layout: &Layout, order: &[BlockId]) -> Result<Emitted, NotFinal> {
     let frame = cfg.frame();
     let mut code = Vec::new();
     let mut patches = Vec::new();
@@ -166,7 +170,7 @@ fn emit(cfg: &Cfg, order: &[BlockId]) -> Result<Emitted, NotFinal> {
                 block: *id,
                 item: index,
             };
-            code.push(materialize(frame, *item, depth, at)?);
+            code.push(materialize(frame, layout, *item, depth, at)?);
             depth = depth.wrapping_add_signed(item.sp_delta());
         }
 
@@ -212,9 +216,23 @@ fn emit(cfg: &Cfg, order: &[BlockId]) -> Result<Emitted, NotFinal> {
 }
 
 /// Turns one item into the instruction it stands for.
-fn materialize(frame: &Frame, item: Item, depth: u32, at: Where) -> Result<Instr, NotFinal> {
+fn materialize(
+    frame: &Frame,
+    layout: &Layout,
+    item: Item,
+    depth: u32,
+    at: Where,
+) -> Result<Instr, NotFinal> {
     let (cell, storing) = match item {
         Item::Instr(instr) => return Ok(instr),
+        // An address fits a `u32` by construction, and a narrow push is four
+        // bytes shorter than a wide one for the same value.
+        Item::Base(region) => {
+            return Ok(Push32 {
+                imm: layout.span(region).base(),
+            }
+            .into());
+        }
         Item::Load(cell) => (cell, false),
         Item::Store(cell) => (cell, true),
     };

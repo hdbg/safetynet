@@ -1,6 +1,7 @@
 //! Tests for the interpreter.
 
 use super::*;
+use crate::image::{Image, Layout, Sizes};
 use crate::isa::*;
 use crate::samples::instructions;
 use crate::{Be, Le};
@@ -11,7 +12,16 @@ const MEMORY: usize = 0x3_0000;
 const STACK_BASE: usize = 0x1_0000;
 
 fn machine<B: ByteOrder>() -> Vm<B> {
-    Vm::new(vec![0; MEMORY], STACK_BASE).expect("an aligned base inside memory")
+    // Everything before the stack is scratch, so the absolute accesses below
+    // have somewhere to land that is not the stack.
+    let layout = Layout::new(Sizes {
+        scratch: STACK_BASE as u32,
+        stack: (MEMORY - STACK_BASE) as u32,
+        ..Sizes::default()
+    })
+    .expect("fits");
+
+    Vm::new(Image::new(layout))
 }
 
 /// Steps a sequence, returning the last instruction's flow.
@@ -80,7 +90,7 @@ fn popping_below_the_stack_base_traps() {
 
 #[test]
 fn growing_past_the_end_of_memory_traps() {
-    let mut vm = Vm::<Le>::new(vec![0; 2 * WORD_SIZE], 0).expect("a valid stack");
+    let mut vm = Vm::<Le>::new(crate::samples::stack_image(2 * WORD_SIZE as u32));
 
     vm.push(1).expect("room");
     vm.push(2).expect("room");
@@ -89,13 +99,6 @@ fn growing_past_the_end_of_memory_traps() {
         run(&mut vm, &[Alloc { n: frame(8) }.into()]),
         Err(Trap::StackOverflow)
     );
-}
-
-#[test]
-fn an_unusable_stack_base_is_refused() {
-    assert!(Vm::<Le>::new(vec![0; 64], 4).is_none(), "not aligned");
-    assert!(Vm::<Le>::new(vec![0; 64], 128).is_none(), "not inside");
-    assert!(Vm::<Le>::new(vec![0; 64], 64).is_some(), "an empty stack");
 }
 
 // -- arithmetic -----------------------------------------------------------

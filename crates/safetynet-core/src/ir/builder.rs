@@ -1,8 +1,8 @@
 //! Building a [`Cfg`].
 
 use super::{Block, BlockId, Cfg, Frame, Item, Terminator};
-use crate::Instr;
 use crate::ir::CellId;
+use crate::{Instr, Region};
 
 /// Builds a [`Cfg`].
 ///
@@ -45,6 +45,12 @@ impl BlockBody {
     /// Appends a store into a frame cell.
     pub fn store(&mut self, cell: CellId) -> &mut Self {
         self.code.push(Item::Store(cell));
+        self
+    }
+
+    /// Appends the address a region begins at.
+    pub fn base(&mut self, region: Region) -> &mut Self {
+        self.code.push(Item::Base(region));
         self
     }
 

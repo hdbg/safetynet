@@ -1,6 +1,7 @@
 //! Samples shared by the tests in this crate.
 
 use crate::encoding::{DecodeError, Decoder, EncodeError, Encoder, decode, encode, encoded_len};
+use crate::image::{Image, Layout, Sizes};
 use crate::isa::*;
 use crate::{ByteOrder, Instr};
 
@@ -61,6 +62,20 @@ pub(crate) fn instructions() -> Vec<Instr> {
         Switch.into(),
         Host { index: 3 }.into(),
     ]
+}
+
+/// An image that is nothing but stack, for tests with no data to place.
+pub(crate) fn stack_image(bytes: u32) -> Image {
+    Image::new(layout(bytes))
+}
+
+/// The layout behind [`stack_image`].
+pub(crate) fn layout(stack: u32) -> Layout {
+    Layout::new(Sizes {
+        stack,
+        ..Sizes::default()
+    })
+    .expect("a stack fits on its own")
 }
 
 /// A stand-in for a later, deliberately different format: the standard encoding

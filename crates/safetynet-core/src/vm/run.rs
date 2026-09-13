@@ -3,10 +3,10 @@
 
 use super::{Flow, Trap, Vm};
 use crate::encoding::{Decoder, Packed};
-use crate::{ByteOrder, Instr};
+use crate::{ByteOrder, Instr, Program};
 
 impl<B: ByteOrder> Vm<B> {
-    /// Runs `code` from its first byte until it halts, spending one unit of
+    /// Runs `program` from its first byte until it halts, spending one unit of
     /// `fuel` per instruction, and hands the machine back.
     ///
     /// Reads the standard encoding; [`run_with`](Vm::run_with) takes a decoder
@@ -20,8 +20,9 @@ impl<B: ByteOrder> Vm<B> {
     /// # Examples
     ///
     /// ```
+    /// use safetynet_core::image::{Image, Layout, Sizes};
     /// use safetynet_core::isa::{Add, Halt, Push8};
-    /// use safetynet_core::{Le, Vm, encoding};
+    /// use safetynet_core::{FrameSize, Le, Program, Vm, encoding};
     ///
     /// let mut code = Vec::new();
     /// encoding::encode_all::<Le>(
@@ -34,14 +35,16 @@ impl<B: ByteOrder> Vm<B> {
     ///     &mut code,
     /// )?;
     ///
-    /// let vm = Vm::<Le>::new(vec![0; 64], 0).expect("a valid stack");
-    /// let mut vm = vm.run(&code, 100)?;
+    /// let layout = Layout::new(Sizes { stack: 64, ..Sizes::default() }).expect("fits");
+    /// let program = Program::<Le>::new(code, FrameSize::default());
+    ///
+    /// let mut vm = Vm::<Le>::new(Image::new(layout)).run(&program, 100)?;
     ///
     /// assert_eq!(vm.pop()?, 42);
     /// # Ok::<_, Box<dyn std::error::Error>>(())
     /// ```
-    pub fn run(self, code: &[u8], fuel: u64) -> Result<Self, Trap> {
-        self.run_with(code, &Packed::<B>::new(), fuel)
+    pub fn run(self, program: &Program<B>, fuel: u64) -> Result<Self, Trap> {
+        self.run_with(program, &Packed::<B>::new(), fuel)
     }
 
     /// Runs `code` through `decoder`.
@@ -53,10 +56,11 @@ impl<B: ByteOrder> Vm<B> {
     /// against that same boundary.
     pub fn run_with<D: Decoder<Order = B>>(
         mut self,
-        code: &[u8],
+        program: &Program<B>,
         decoder: &D,
         fuel: u64,
     ) -> Result<Self, Trap> {
+        let code = program.code();
         let mut fuel = fuel;
         let mut pc = 0;
 
@@ -123,16 +127,19 @@ mod tests {
     use super::*;
     use crate::encoding::{encode_all, encoded_len};
     use crate::isa::*;
-    use crate::{Be, Le, Word};
+    use crate::samples::stack_image;
+    use crate::{Be, FrameSize, Le, Word};
 
-    fn assemble<B: ByteOrder>(program: &[Instr]) -> Vec<u8> {
+    /// Hand-assembles instructions into a program, the way a front-end that is
+    /// not a graph would.
+    fn assemble<B: ByteOrder>(program: &[Instr]) -> Program<B> {
         let mut code = Vec::new();
         encode_all::<B>(program, &mut code).expect("encodes");
-        code
+        Program::new(code, FrameSize::default())
     }
 
     fn machine<B: ByteOrder>() -> Vm<B> {
-        Vm::new(vec![0; 1024], 0).expect("a valid stack")
+        Vm::new(stack_image(1024))
     }
 
     /// Runs a program and returns its result: the word left on top.
@@ -231,14 +238,18 @@ mod tests {
 
         assert_eq!(
             machine::<Le>().run(&code, 10).err(),
-            Some(Trap::CodeOutOfRange { offset: code.len() })
+            Some(Trap::CodeOutOfRange {
+                offset: code.code().len()
+            })
         );
     }
 
     #[test]
     fn undecodable_bytes_trap() {
         assert_eq!(
-            machine::<Le>().run(&[0x7f], 10).err(),
+            machine::<Le>()
+                .run(&Program::new(vec![0x7f], FrameSize::default()), 10)
+                .err(),
             Some(Trap::BadInstruction { offset: 0 })
         );
     }
@@ -280,7 +291,7 @@ mod format_tests {
     use crate::Width;
     use crate::ir::{Cfg, Frame, Terminator, finalize_with};
     use crate::isa::{Add, Push8};
-    use crate::samples::Padded;
+    use crate::samples::{Padded, layout, stack_image};
     use crate::{Be, Le};
 
     /// A program laid out in one format and read back in the same one, with the
@@ -314,17 +325,16 @@ mod format_tests {
 
         let cfg = builder.build(entry).expect("builds");
         let format = Padded::<B>::default();
-        let program = finalize_with(&cfg, &format).expect("finalizes");
+        let program = finalize_with(&cfg, &layout(256), &format).expect("finalizes");
 
-        let packed = crate::ir::finalize::<B>(&cfg).expect("finalizes");
+        let packed = crate::ir::finalize::<B>(&cfg, &layout(256)).expect("finalizes");
         assert!(
             program.code().len() > packed.code().len(),
             "the padding is really there"
         );
 
-        let vm = Vm::<B>::new(vec![0; 256], 0).expect("a valid stack");
-        let mut vm = vm
-            .run_with(program.code(), &format, 1000)
+        let mut vm = Vm::<B>::new(stack_image(256))
+            .run_with(&program, &format, 1000)
             .expect("terminates");
 
         assert_eq!(vm.pop(), Ok(42));
@@ -350,11 +360,11 @@ mod format_tests {
         builder.seal(entry, Terminator::Halt).expect("seals");
 
         let cfg = builder.build(entry).expect("builds");
-        let program = finalize_with(&cfg, &Padded::<Le>::default()).expect("finalizes");
+        let program =
+            finalize_with(&cfg, &layout(256), &Padded::<Le>::default()).expect("finalizes");
 
-        let vm = Vm::<Le>::new(vec![0; 256], 0).expect("a valid stack");
         assert_eq!(
-            vm.run(program.code(), 1000).err(),
+            Vm::<Le>::new(stack_image(256)).run(&program, 1000).err(),
             Some(Trap::BadInstruction { offset: 2 }),
             "the filler after the first instruction is not an opcode"
         );

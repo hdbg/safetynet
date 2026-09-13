@@ -2,9 +2,10 @@
 
 use super::*;
 use crate::encoding::{EncodeError, Encoder, decode, encode, encoded_len};
+use crate::image::{Image, Layout, Region, Sizes};
 use crate::ir::{Frame, Terminator};
 use crate::isa::{Add, Halt, Push8, Sub, Switch};
-use crate::samples::Padded;
+use crate::samples::{Padded, layout, stack_image};
 use crate::vm::Vm;
 use crate::{Be, Le, Op, Width, Word};
 
@@ -72,8 +73,8 @@ fn sum_to(n: u8, junk: bool) -> Cfg {
 
 /// Runs a finalized program and returns the word it left on top.
 fn run<B: ByteOrder>(program: &Program<B>) -> Result<Word, Box<dyn core::error::Error>> {
-    let vm = Vm::<B>::new(vec![0; 1024], 0).ok_or("a valid stack")?;
-    Ok(vm.run(program.code(), 10_000)?.pop()?)
+    let vm = Vm::<B>::new(stack_image(1024));
+    Ok(vm.run(program, 10_000)?.pop()?)
 }
 
 /// Decodes a program back into instructions, for looking at what came out.
@@ -93,7 +94,7 @@ fn disassemble<B: ByteOrder>(program: &Program<B>) -> Vec<Instr> {
 
 /// The phase's own bar: a graph built by hand runs on the machine.
 fn a_graph_runs_on_the_machine<B: ByteOrder>() {
-    let program = finalize::<B>(&sum_to(5, false)).expect("finalizes");
+    let program = finalize::<B>(&sum_to(5, false), &layout(1024)).expect("finalizes");
 
     assert_eq!(program.frame().bytes(), 16, "two word cells");
     assert_eq!(run(&program).ok(), Some(15), "5 + 4 + 3 + 2 + 1");
@@ -117,8 +118,8 @@ fn a_graph_runs_on_the_machine_be() {
 /// pointing a cell short.
 #[test]
 fn junk_stack_traffic_moves_displacements_and_nothing_else() {
-    let plain = finalize::<Le>(&sum_to(5, false)).expect("finalizes");
-    let padded = finalize::<Le>(&sum_to(5, true)).expect("finalizes");
+    let plain = finalize::<Le>(&sum_to(5, false), &layout(1024)).expect("finalizes");
+    let padded = finalize::<Le>(&sum_to(5, true), &layout(1024)).expect("finalizes");
 
     let displacements = |program: &Program<Le>| {
         disassemble(program)
@@ -154,7 +155,7 @@ fn a_displacement_comes_from_the_depth_at_that_point() {
     builder.seal(entry, Terminator::Halt).expect("seals");
 
     let cfg = builder.build(entry).expect("builds");
-    let program = finalize::<Le>(&cfg).expect("finalizes");
+    let program = finalize::<Le>(&cfg, &layout(1024)).expect("finalizes");
 
     assert_eq!(
         disassemble(&program),
@@ -184,7 +185,7 @@ fn an_edge_to_the_next_block_falls_through() {
     builder.seal(next, Terminator::Halt).expect("seals");
 
     let cfg = builder.build(entry).expect("builds");
-    let program = finalize::<Le>(&cfg).expect("finalizes");
+    let program = finalize::<Le>(&cfg, &layout(1024)).expect("finalizes");
 
     assert_eq!(
         disassemble(&program),
@@ -214,7 +215,7 @@ fn a_conditional_falls_into_whichever_edge_follows() {
     // `then` is laid out next, so the branch is the negated one and `els` is the
     // edge that costs an instruction.
     assert_eq!(
-        disassemble(&finalize::<Le>(&cfg).expect("finalizes")),
+        disassemble(&finalize::<Le>(&cfg, &layout(1024)).expect("finalizes")),
         [
             Push8 { imm: 1 }.into(),
             Jz { offset: 1 }.into(),
@@ -227,7 +228,7 @@ fn a_conditional_falls_into_whichever_edge_follows() {
 /// A backwards branch lands on the first byte of its target.
 #[test]
 fn a_back_edge_reaches_its_target() {
-    let program = finalize::<Le>(&sum_to(3, false)).expect("finalizes");
+    let program = finalize::<Le>(&sum_to(3, false), &layout(1024)).expect("finalizes");
     let code = program.code();
 
     let mut at = 0;
@@ -270,7 +271,7 @@ fn a_switch_has_no_encoding_yet() {
 
     let cfg = builder.build(entry).expect("builds");
     assert!(matches!(
-        finalize::<Le>(&cfg),
+        finalize::<Le>(&cfg, &layout(1024)),
         Err(NotFinal::Unsupported { what: "switch", .. })
     ));
 
@@ -289,7 +290,7 @@ fn an_invalid_graph_is_not_finalized() {
 
     let cfg = builder.build(entry).expect("builds");
     assert!(matches!(
-        finalize::<Le>(&cfg),
+        finalize::<Le>(&cfg, &layout(1024)),
         Err(NotFinal::Invalid(Invalid::NegativeDepth { .. }))
     ));
 }
@@ -317,8 +318,8 @@ impl Encoder for Liar {
 fn layout_follows_whatever_the_encoder_measures() {
     let cfg = sum_to(3, false);
 
-    let packed = finalize::<Le>(&cfg).expect("finalizes");
-    let padded = finalize_with(&cfg, &Padded::<Le>::default()).expect("finalizes");
+    let packed = finalize::<Le>(&cfg, &layout(1024)).expect("finalizes");
+    let padded = finalize_with(&cfg, &layout(1024), &Padded::<Le>::default()).expect("finalizes");
 
     // Walking the padded stream means skipping the filler byte each time.
     let mut instructions = Vec::new();
@@ -359,7 +360,72 @@ fn an_encoder_that_miscounts_is_caught() {
     let cfg = sum_to(3, false);
 
     assert!(matches!(
-        finalize_with(&cfg, &Liar),
+        finalize_with(&cfg, &layout(1024), &Liar),
         Err(NotFinal::EncoderDisagrees { .. })
     ));
+}
+
+/// A region's address is the layout's to decide. The same graph laid out against
+/// two images pushes two different addresses, and neither the graph nor the host
+/// holds a constant that has to match the other.
+#[test]
+fn a_region_base_comes_from_the_layout() {
+    let mut builder = Cfg::builder(Frame::new());
+    let entry = builder.block(0);
+    builder.at(entry).expect("open").base(Region::Scratch);
+    builder.seal(entry, Terminator::Halt).expect("seals");
+    let cfg = builder.build(entry).expect("builds");
+
+    let pushed = |input| {
+        let layout = Layout::new(Sizes {
+            input,
+            scratch: 8,
+            stack: 64,
+        })
+        .expect("fits");
+
+        let program = finalize::<Le>(&cfg, &layout).expect("finalizes");
+        match disassemble(&program).first().copied() {
+            Some(Instr::Push32(op)) => op.imm,
+            other => panic!("expected a pushed address, got {other:?}"),
+        }
+    };
+
+    assert_eq!(
+        pushed(0),
+        0,
+        "scratch starts the image when nothing precedes"
+    );
+    assert_eq!(pushed(8), 8, "and moves with whatever does");
+    assert_eq!(pushed(9), 16, "rounded up to a word boundary");
+}
+
+/// The point of the whole map: the host writes a region and the program reads it
+/// without either of them naming an address.
+#[test]
+fn the_host_and_the_program_agree_without_a_shared_constant() {
+    let layout = Layout::new(Sizes {
+        input: 4,
+        scratch: 13,
+        stack: 64,
+    })
+    .expect("fits");
+
+    let mut builder = Cfg::builder(Frame::new());
+    let entry = builder.block(0);
+    builder
+        .at(entry)
+        .expect("open")
+        .base(Region::Input)
+        .instr(crate::isa::Ld8);
+    builder.seal(entry, Terminator::Halt).expect("seals");
+
+    let cfg = builder.build(entry).expect("builds");
+    let program = finalize::<Le>(&cfg, &layout).expect("finalizes");
+
+    let mut image = Image::new(layout);
+    image.write(Region::Input, &[0xa5]).expect("room");
+
+    let mut vm = Vm::<Le>::new(image).run(&program, 100).expect("terminates");
+    assert_eq!(vm.pop(), Ok(0xa5));
 }
