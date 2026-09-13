@@ -101,46 +101,46 @@ macro_rules! cipher_program {
         safetynet::asm!($order {
         .frame { cursor: u64, end: u64, state: u64, tag: u64, last: u8, count: u32 }
     entry:
-        push .input
-        store cursor
-        push .input
-        push .scratch
-        field Config::len            // the message length the host marshalled
+        $push .input
+        $store cursor
+        $push .input
+        $push .scratch
+        $field Config::len            // the message length the host marshalled
         add
         ld32
         add
-        store end
-        push .scratch                // and the seed, read back from the config
-        field Config::seed
+        $store end
+        $push .scratch                // and the seed, read back from the config
+        $field Config::seed
         add
         ld64
-        store state
+        $store state
         push8 0
-        store tag
+        $store tag
         push8 0
-        store count
+        $store count
         push8 0
-        store last                   // every cell is written before it is read
+        $store last                   // every cell is written before it is read
     head:
-        load cursor
-        load end
+        $load cursor
+        $load end
         eq
         jnz done
     body:
         // A word of junk under the whole body: it shifts every frame
         // displacement below, and the symbolic assembler recomputes them all.
         push32 0x0badf00d
-        load state                   // state = state * MUL + INC
+        $load state                   // state = state * MUL + INC
         push64 0x5851f42d4c957f2d
         mul
         push64 0x14057b7ef767814f
         add
-        store state
-        load cursor                  // the address `st8` pops last
-        load cursor
+        $store state
+        $load cursor                  // the address `st8` pops last
+        $load cursor
         ld8
-        load state                   // k = (state ^ (state >> 33)) & 0xff
-        load state
+        $load state                   // k = (state ^ (state >> 33)) & 0xff
+        $load state
         push8 33
         shr
         xor
@@ -148,110 +148,110 @@ macro_rules! cipher_program {
         and
         xor                          // the cipher byte
         lds64 8                      // dup it for the tag
-        store last
+        $store last
         st8
-        load tag                     // tag = rotl(tag, 7) ^ byte
+        $load tag                     // tag = rotl(tag, 7) ^ byte
         push8 7
         shl
-        load tag
+        $load tag
         push8 57
         shr
         or
-        load last                    // one byte, zero-extended back to a word
+        $load last                    // one byte, zero-extended back to a word
         xor
-        store tag
-        load count                   // one more byte behind us
+        $store tag
+        $load count                   // one more byte behind us
         push8 1
         add
-        store count
-        load cursor
+        $store count
+        $load cursor
         push8 1
         add
-        store cursor
+        $store cursor
         drop                         // and the junk goes with the iteration
         jmp head
     done:
-        load state                   // fold the state's two halves under 65521
+        $load state                   // fold the state's two halves under 65521
         push32 65521
         rem
-        load state
+        $load state
         push32 65521
         div
         add
-        load tag
+        $load tag
         xor
-        store tag
-        load state                   // and the same state read as signed
+        $store tag
+        $load state                   // and the same state read as signed
         push64 0xfffffffffffffffd    // -3
         sdiv
-        load state
+        $load state
         push64 0xfffffffffffffffb    // -5
         srem
         add
-        load tag
+        $load tag
         xor
-        store tag
-        load state
+        $store tag
+        $load state
         push8 13
         sar
-        load tag
+        $load tag
         xor
-        store tag
-        load state                   // four orderings of state against tag,
-        load tag                     // packed into the low bits
+        $store tag
+        $load state                   // four orderings of state against tag,
+        $load tag                     // packed into the low bits
         lt
-        load state
-        load tag
+        $load state
+        $load tag
         le
         push8 1
         shl
         or
-        load state
-        load tag
+        $load state
+        $load tag
         slt
         push8 2
         shl
         or
-        load state
-        load tag
+        $load state
+        $load tag
         sle
         push8 3
         shl
         or
-        push .scratch                // and one the layout decides
-        push .stack
+        $push .scratch                // and one the layout decides
+        $push .stack
         lt
         push8 4
         shl
         or
-        load tag
+        $load tag
         xor
-        store tag
-        load tag
+        $store tag
+        $load tag
         not
-        store tag
-        load end                     // the bytes the loop should have walked
-        push .input
+        $store tag
+        $load end                     // the bytes the loop should have walked
+        $push .input
         sub
-        load count
+        $load count
         eq
         jz bad
     good:
-        push .scratch                // the tag, past the config
+        $push .scratch                // the tag, past the config
         push8 16
         add
-        load tag
+        $load tag
         st64
-        push .scratch                // its low half, in a slot of its own
+        $push .scratch                // its low half, in a slot of its own
         push8 24
         add
-        load tag
+        $load tag
         st32
-        push .scratch
+        $push .scratch
         push8 24
         add
         ld32                         // read back zero-extended, into the result
-        load tag
+        $load tag
         add
         halt
     bad:

@@ -52,6 +52,13 @@ pub(crate) fn statement(input: ParseStream, cells: &[CellDecl]) -> syn::Result<S
     if input.peek(Token![.]) {
         return Err(input.error("a directive belongs before the first block"));
     }
+
+    // `$` marks the meta-instructions: the ones that stand in for a real op with
+    // an operand the assembler resolves, rather than an opcode of their own.
+    let meta = input.peek(Token![$]);
+    if meta {
+        input.parse::<Token![$]>()?;
+    }
     if !input.peek(Ident::peek_any) {
         return Err(input.error("expected an instruction"));
     }
@@ -59,6 +66,24 @@ pub(crate) fn statement(input: ParseStream, cells: &[CellDecl]) -> syn::Result<S
     let word = Ident::parse_any(input)?;
     let at = word.span();
     let name = word.unraw().to_string();
+
+    let is_meta = matches!(name.as_str(), "load" | "store" | "field" | "push");
+    if meta && !is_meta {
+        return Err(syn::Error::new(
+            at,
+            format!("`{name}` is not a meta-instruction; drop the `$`"),
+        ));
+    }
+    if !meta && is_meta {
+        let hint = if name == "push" {
+            "`push` is a meta-instruction; write `$push` for a region base, \
+             or `push8`/`push32`/`push64` for an immediate"
+                .to_string()
+        } else {
+            format!("`{name}` is a meta-instruction; write `${name}`")
+        };
+        return Err(syn::Error::new(at, hint));
+    }
 
     match name.as_str() {
         // The only instruction that is also a way to end a block.
@@ -202,7 +227,7 @@ fn base(input: ParseStream, at: Span) -> syn::Result<Stmt> {
     if !input.peek(Token![.]) {
         return Err(syn::Error::new(
             at,
-            "`push` needs a width — `push8`, `push32`, `push64` — or a region, as in `push .input`",
+            "`$push` needs a region, as in `$push .input`",
         ));
     }
     input.parse::<Token![.]>()?;

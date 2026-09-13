@@ -600,30 +600,30 @@ const PROG: Program<Le> = safetynet::asm!(Le {
 entry:
     enter                   // ALLOC <frame size, rounded to 8>, zeroed
     push 0
-    store acc               // STS.u8  — truncates to the cell's width
+    $store acc              // STS.u8  — truncates to the cell's width
     push 0
-    store i
+    $store i
 head:
-    load  i                 // LDS.u32 — zero-extends to a word
+    $load i                 // LDS.u32 — zero-extends to a word
     push  5
     lt
     jz done                 // conditional; the other arm is fallthrough → body
 body:
-    load  acc
-    push  KEY               // .rodata symbol → base address
-    load  i
+    $load acc
+    $push KEY               // .rodata symbol → base address
+    $load i
     add
     ld8
     xor
-    store acc
-    load  i
+    $store acc
+    $load i
     push  1
     add
-    store i
+    $store i
     jmp head
 done:
-    push  .ret
-    load  acc
+    $push .ret
+    $load acc
     st8                     // result into .ret
     leave                   // FREE <frame size>
     halt
@@ -653,7 +653,7 @@ Rules:
   a symbolic assembler a requirement rather than a convenience. Raw `lds`/`sts`
   with literal displacements stay spellable, for tests that target the
   materialization itself.
-- **Field holes work here too.** `field Packet::header.seq` emits the same
+- **Field holes work here too.** `$field Packet::header.seq` emits the same
   symbolic `Operand::Field` the lowerer emits (§6.2), so the relocation path can be
   exercised before either the lowerer or the derive exists.
 - **Validation is the macro's job.** SP invariant, single terminator, edge

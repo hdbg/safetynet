@@ -35,9 +35,9 @@ fn program() -> Artifact<Le> {
     safetynet::asm!(Le {
         .frame { cursor: u64 }
     entry:
-        push .input        // the input region's base — filled in at finalize
-        store cursor
-        load cursor
+        $push .input       // the input region's base — filled in at finalize
+        $store cursor
+        $load cursor
         halt
     })
 }
@@ -68,7 +68,7 @@ fn program() -> Artifact<Le> {
 ```
 
 (The relocation's `vec!` is shown collapsed; nightly `cargo expand` renders that
-macro's internals.) `push .input` became a placeholder `push32 0` at byte 3,
+macro's internals.) `$push .input` became a placeholder `push32 0` at byte 3,
 paired with a relocation. `finalize` runs the relocations against a layout and
 returns runnable bytecode; the VM executes it in the artifact's byte order:
 

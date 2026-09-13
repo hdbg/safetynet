@@ -198,23 +198,23 @@ fn a_table_survives_being_printed() {
 const LOOP: &str = concat!(
     ".frame { cursor: u64, limit: u64 }\n",
     "head:\n",
-    "    push .input\n",
-    "    store cursor\n",
-    "    push .scratch\n",
-    "    store limit\n",
+    "    $push .input\n",
+    "    $store cursor\n",
+    "    $push .scratch\n",
+    "    $store limit\n",
     "loop:\n",
-    "    load cursor\n",
-    "    load limit\n",
+    "    $load cursor\n",
+    "    $load limit\n",
     "    lt\n",
     "    jz done\n",
     "body:\n",
-    "    load cursor\n",
+    "    $load cursor\n",
     "    push8 0x10\n",
     "    add\n",
-    "    store cursor\n",
+    "    $store cursor\n",
     "    jmp loop\n",
     "done:\n",
-    "    load cursor\n",
+    "    $load cursor\n",
     "    halt\n",
 );
 
@@ -232,24 +232,24 @@ fn a_hand_written_source_canonicalizes_and_then_holds_still() {
         concat!(
             ".frame { c0: u64, c1: u64 }\n",
             "b0:\n",
-            "    push .input\n",
-            "    store c0\n",
-            "    push .scratch\n",
-            "    store c1\n",
+            "    $push .input\n",
+            "    $store c0\n",
+            "    $push .scratch\n",
+            "    $store c1\n",
             "    jmp b1\n",
             "b1:\n",
-            "    load c0\n",
-            "    load c1\n",
+            "    $load c0\n",
+            "    $load c1\n",
             "    lt\n",
             "    jz b3\n",
             "b2:\n",
-            "    load c0\n",
+            "    $load c0\n",
             "    push8 16\n",
             "    add\n",
-            "    store c0\n",
+            "    $store c0\n",
             "    jmp b1\n",
             "b3:\n",
-            "    load c0\n",
+            "    $load c0\n",
             "    halt\n",
         )
     );
@@ -356,7 +356,7 @@ fn an_invocation_expands_to_one_expression() {
 #[test]
 fn a_region_base_becomes_a_relocation() {
     let tokens =
-        expand("Le { b0: push .input drop halt }".parse().expect("tokens")).expect("expands");
+        expand("Le { b0: $push .input drop halt }".parse().expect("tokens")).expect("expands");
     assert!(tokens.to_string().contains("region_base"), "{tokens}");
 }
 
@@ -478,7 +478,7 @@ fn a_second_block_of_the_same_name_is_the_one_reported() {
 
 #[test]
 fn an_access_to_a_cell_that_was_never_declared_names_it() {
-    let source = "b0:\n    load ghost\n    halt\n";
+    let source = "b0:\n    $load ghost\n    halt\n";
     assert_rejects(source, at(source, "ghost"), "unknown cell `ghost`");
 }
 
@@ -580,7 +580,7 @@ fn an_entry_that_names_nothing_is_reported_at_the_name() {
 
 #[test]
 fn an_unknown_region_lists_the_ones_there_are() {
-    let source = "b0:\n    push .heap\n    halt\n";
+    let source = "b0:\n    $push .heap\n    halt\n";
     assert_rejects(source, at(source, "heap"), "unknown region `.heap`");
 }
 

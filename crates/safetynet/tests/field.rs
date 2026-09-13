@@ -106,7 +106,7 @@ macro_rules! push_field {
     ($order:ident, $($path:tt)*) => {
         safetynet::asm!($order {
         entry:
-            field $($path)*
+            $field $($path)*
             halt
         })
     };
@@ -184,8 +184,8 @@ macro_rules! read_seq {
     ($order:ident) => {
         safetynet::asm!($order {
         entry:
-            push .input                 // base of the marshalled packet
-            field Packet::header.seq    // its offset within the packet
+            $push .input                 // base of the marshalled packet
+            $field Packet::header.seq    // its offset within the packet
             add                         // the field's absolute address
             ld32
             halt

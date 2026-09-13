@@ -129,9 +129,9 @@ fn a_graph_prints_as_the_text_that_spells_it() {
             ".frame { c0: u32, c1: u8 }\n",
             ".entry b1\n",
             "b0:\n",
-            "    push .input\n",
-            "    load c0\n",
-            "    store c1\n",
+            "    $push .input\n",
+            "    $load c0\n",
+            "    $store c1\n",
             // Spelled out even though b1 is next: the parser turns a
             // fallthrough into the same `Jmp`, so printing one keeps the text a
             // fixed point without needing the reader to infer the edge.
