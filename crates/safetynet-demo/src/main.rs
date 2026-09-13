@@ -62,6 +62,7 @@ impl VmLayout for Config {
         Field::new("len", 8, 4, None),
     ]);
     const SIZE: usize = 16;
+    const ALIGN: usize = 8;
 
     fn marshal<B: ByteOrder>(&self, mem: &mut [u8]) {
         if let Some(slot) = mem.get_mut(0..8) {

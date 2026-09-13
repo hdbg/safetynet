@@ -113,23 +113,94 @@ impl Field {
     }
 }
 
-/// An aggregate that can cross the host/VM boundary.
+/// A type that lays out in the image and can cross the host/VM boundary.
+///
+/// Aggregates get a derive; the scalars implement it below with an empty layout,
+/// so a derive can size, place and marshal every field the same way rather than
+/// telling a scalar from a nested struct by its tokens.
 pub trait VmLayout: Sized {
-    /// The canonical flat layout: the single source of truth for offsets.
+    /// The canonical flat layout: the single source of truth for offsets. Empty
+    /// for a scalar.
     const LAYOUT: &'static TypeLayout;
 
-    /// Total bytes the aggregate occupies in the image.
+    /// Total bytes occupied in the image.
     const SIZE: usize;
+
+    /// Alignment: a scalar's is its size, an aggregate's its widest field.
+    const ALIGN: usize;
 
     /// Writes `self` into the first [`SIZE`](Self::SIZE) bytes of `mem`, in
     /// order `B`. The caller sizes `mem`; padding between fields is left as it
     /// was found.
     fn marshal<B: ByteOrder>(&self, mem: &mut [u8]);
 
-    /// Reads an aggregate back out of `mem`, interpreting multi-byte fields in
-    /// order `B`. The inverse of [`marshal`](Self::marshal).
+    /// Reads a value back out of `mem`, interpreting multi-byte fields in order
+    /// `B`. The inverse of [`marshal`](Self::marshal).
     fn unmarshal<B: ByteOrder>(mem: &[u8]) -> Self;
 }
+
+/// A scalar is a degenerate layout: no fields, and its own bytes are the whole
+/// of it.
+const SCALAR: &TypeLayout = &TypeLayout::new(&[]);
+
+/// Implements [`VmLayout`] for a single-byte scalar, where byte order does not
+/// enter into it.
+macro_rules! byte_layout {
+    ($ty:ty, |$byte:ident| $from:expr) => {
+        impl VmLayout for $ty {
+            const LAYOUT: &'static TypeLayout = SCALAR;
+            const SIZE: usize = 1;
+            const ALIGN: usize = 1;
+
+            fn marshal<B: ByteOrder>(&self, mem: &mut [u8]) {
+                if let Some(slot) = mem.first_mut() {
+                    *slot = *self as u8;
+                }
+            }
+
+            fn unmarshal<B: ByteOrder>(mem: &[u8]) -> Self {
+                let $byte = mem.first().copied().unwrap_or_default();
+                $from
+            }
+        }
+    };
+}
+
+byte_layout!(u8, |byte| byte);
+byte_layout!(i8, |byte| byte as i8);
+byte_layout!(bool, |byte| byte != 0);
+
+/// Implements [`VmLayout`] for a multi-byte scalar through its unsigned twin, so
+/// the two's-complement bits move whichever the sign.
+macro_rules! word_layout {
+    ($ty:ty, $size:literal, $unsigned:ty, $write:ident, $read:ident) => {
+        impl VmLayout for $ty {
+            const LAYOUT: &'static TypeLayout = SCALAR;
+            const SIZE: usize = $size;
+            const ALIGN: usize = $size;
+
+            fn marshal<B: ByteOrder>(&self, mem: &mut [u8]) {
+                if let Some(slot) = mem.get_mut(..$size) {
+                    slot.copy_from_slice(&B::$write(*self as $unsigned));
+                }
+            }
+
+            fn unmarshal<B: ByteOrder>(mem: &[u8]) -> Self {
+                mem.get(..$size)
+                    .and_then(|slot| slot.try_into().ok())
+                    .map(B::$read)
+                    .unwrap_or_default() as $ty
+            }
+        }
+    };
+}
+
+word_layout!(u16, 2, u16, write_u16, read_u16);
+word_layout!(i16, 2, u16, write_u16, read_u16);
+word_layout!(u32, 4, u32, write_u32, read_u32);
+word_layout!(i32, 4, u32, write_u32, read_u32);
+word_layout!(u64, 8, u64, write_u64, read_u64);
+word_layout!(i64, 8, u64, write_u64, read_u64);
 
 /// Byte-for-byte string equality, in `const`.
 const fn str_eq(a: &str, b: &str) -> bool {
@@ -166,6 +237,7 @@ mod tests {
             Field::new("flags", 4, 1, None),
         ]);
         const SIZE: usize = 8;
+        const ALIGN: usize = 4;
 
         fn marshal<B: ByteOrder>(&self, mem: &mut [u8]) {
             put(mem, 0, &B::write_u32(self.seq));
@@ -196,6 +268,7 @@ mod tests {
             Field::new("tag", 16, 8, None),
         ]);
         const SIZE: usize = 24;
+        const ALIGN: usize = 8;
 
         fn marshal<B: ByteOrder>(&self, mem: &mut [u8]) {
             put(mem, 0, &[self.kind]);
@@ -317,5 +390,55 @@ mod tests {
         assert_eq!(at(&["header", "nope"]), None);
         assert_eq!(at(&["kind", "seq"]), None, "kind is a scalar");
         assert_eq!(at(&[]), None);
+    }
+
+    /// A scalar lays out as itself: the VM's own width, its own alignment, and no
+    /// fields to descend into.
+    #[test]
+    fn a_scalar_is_a_degenerate_layout() {
+        assert_eq!((<u8 as VmLayout>::SIZE, <u8 as VmLayout>::ALIGN), (1, 1));
+        assert_eq!(
+            (<bool as VmLayout>::SIZE, <bool as VmLayout>::ALIGN),
+            (1, 1)
+        );
+        assert_eq!((<u16 as VmLayout>::SIZE, <u16 as VmLayout>::ALIGN), (2, 2));
+        assert_eq!((<i32 as VmLayout>::SIZE, <i32 as VmLayout>::ALIGN), (4, 4));
+        assert_eq!((<u64 as VmLayout>::SIZE, <u64 as VmLayout>::ALIGN), (8, 8));
+        assert!(<u32 as VmLayout>::LAYOUT.fields().is_empty());
+    }
+
+    /// A scalar marshals its bytes and reads them back, negatives and all.
+    fn scalar_round_trips<B: ByteOrder>() {
+        let mut mem = [0u8; 8];
+
+        0x1122_3344u32.marshal::<B>(&mut mem);
+        assert_eq!(u32::unmarshal::<B>(&mem), 0x1122_3344);
+
+        (-1234i16).marshal::<B>(&mut mem);
+        assert_eq!(i16::unmarshal::<B>(&mem), -1234);
+
+        true.marshal::<B>(&mut mem);
+        assert!(bool::unmarshal::<B>(&mem));
+    }
+
+    #[test]
+    fn scalar_round_trips_le() {
+        scalar_round_trips::<Le>();
+    }
+
+    #[test]
+    fn scalar_round_trips_be() {
+        scalar_round_trips::<Be>();
+    }
+
+    /// A scalar writes exactly what the byte-order helper writes — the fact a
+    /// derived `marshal` relies on to match a hand-written one.
+    #[test]
+    fn a_scalar_matches_the_byte_order_helper() {
+        let mut mem = [0u8; 4];
+        0x0102_0304u32.marshal::<Le>(&mut mem);
+        assert_eq!(mem, Le::write_u32(0x0102_0304));
+        0x0102_0304u32.marshal::<Be>(&mut mem);
+        assert_eq!(mem, Be::write_u32(0x0102_0304));
     }
 }

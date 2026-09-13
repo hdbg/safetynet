@@ -20,6 +20,7 @@ impl VmLayout for Header {
         Field::new("flags", 4, 1, None),
     ]);
     const SIZE: usize = 8;
+    const ALIGN: usize = 4;
 
     fn marshal<B: ByteOrder>(&self, mem: &mut [u8]) {
         mem.get_mut(0..4)
@@ -58,6 +59,7 @@ impl VmLayout for Packet {
         Field::new("tag", 16, 8, None),
     ]);
     const SIZE: usize = 24;
+    const ALIGN: usize = 8;
 
     fn marshal<B: ByteOrder>(&self, mem: &mut [u8]) {
         if let Some(byte) = mem.get_mut(0) {
