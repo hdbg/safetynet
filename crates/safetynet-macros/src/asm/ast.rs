@@ -11,7 +11,7 @@ use safetynet_core::Width;
 use safetynet_core::ir::Item;
 use syn::ext::IdentExt as _;
 use syn::parse::{Parse, ParseStream};
-use syn::{Ident, Token, braced};
+use syn::{Ident, Path, Token, braced};
 
 use super::mnemonic::{Stmt, statement};
 
@@ -31,11 +31,29 @@ pub(crate) struct CellDecl {
     pub(crate) width: Width,
 }
 
+/// A block-body step: a resolved instruction, or a field reference still
+/// carrying the type and path only the call site can resolve.
+#[derive(Debug)]
+pub(crate) enum RawItem {
+    Core(Item),
+    Field { ty: Path, path: Vec<Ident> },
+}
+
+impl RawItem {
+    /// Net change to `SP`, in bytes.
+    pub(crate) fn sp_delta(&self) -> i32 {
+        match self {
+            Self::Core(item) => item.sp_delta(),
+            Self::Field { .. } => Item::Field(0).sp_delta(),
+        }
+    }
+}
+
 /// One block, with its terminator still naming labels.
 #[derive(Debug)]
 pub(crate) struct RawBlock {
     pub(crate) label: Ident,
-    pub(crate) items: Vec<(Item, Span)>,
+    pub(crate) items: Vec<(RawItem, Span)>,
     /// Absent when the block runs into the next label: falling through is an
     /// edge the next pass draws, because only it knows what comes next.
     pub(crate) term: Option<(RawTerm, Span)>,

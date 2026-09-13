@@ -54,6 +54,12 @@ impl BlockBody {
         self
     }
 
+    /// Appends a field-offset hole, named by `hole`.
+    pub fn field(&mut self, hole: u32) -> &mut Self {
+        self.code.push(Item::Field(hole));
+        self
+    }
+
     /// What has been written so far.
     pub fn code(&self) -> &[Item] {
         &self.code

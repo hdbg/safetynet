@@ -27,14 +27,14 @@ use safetynet_core::isa::{
 use safetynet_core::{FrameSize, Instr, Region};
 use syn::ext::IdentExt as _;
 use syn::parse::ParseStream;
-use syn::{Ident, LitInt, Token, bracketed, token};
+use syn::{Ident, LitInt, Path, Token, bracketed, token};
 
-use super::ast::{CellDecl, RawTerm, cell_index, opens_block};
+use super::ast::{CellDecl, RawItem, RawTerm, cell_index, opens_block};
 
 /// One statement: either a step of a block's body, or the end of the block.
 #[derive(Debug)]
 pub(crate) enum Stmt {
-    Item(Item, Span),
+    Item(RawItem, Span),
     Term(RawTerm, Span),
 }
 
@@ -52,6 +52,13 @@ pub(crate) fn statement(input: ParseStream, cells: &[CellDecl]) -> syn::Result<S
     if input.peek(Token![.]) {
         return Err(input.error("a directive belongs before the first block"));
     }
+
+    // `$` marks the meta-instructions: the ones that stand in for a real op with
+    // an operand the assembler resolves, rather than an opcode of their own.
+    let meta = input.peek(Token![$]);
+    if meta {
+        input.parse::<Token![$]>()?;
+    }
     if !input.peek(Ident::peek_any) {
         return Err(input.error("expected an instruction"));
     }
@@ -59,6 +66,24 @@ pub(crate) fn statement(input: ParseStream, cells: &[CellDecl]) -> syn::Result<S
     let word = Ident::parse_any(input)?;
     let at = word.span();
     let name = word.unraw().to_string();
+
+    let is_meta = matches!(name.as_str(), "load" | "store" | "field" | "push");
+    if meta && !is_meta {
+        return Err(syn::Error::new(
+            at,
+            format!("`{name}` is not a meta-instruction; drop the `$`"),
+        ));
+    }
+    if !meta && is_meta {
+        let hint = if name == "push" {
+            "`push` is a meta-instruction; write `$push` for a region base, \
+             or `push8`/`push32`/`push64` for an immediate"
+                .to_string()
+        } else {
+            format!("`{name}` is a meta-instruction; write `${name}`")
+        };
+        return Err(syn::Error::new(at, hint));
+    }
 
     match name.as_str() {
         // The only instruction that is also a way to end a block.
@@ -119,6 +144,8 @@ pub(crate) fn statement(input: ParseStream, cells: &[CellDecl]) -> syn::Result<S
         "switch" if input.peek(token::Bracket) => table(input, at),
         "switch" => Ok(instr(Switch, at)),
 
+        "field" => field_ref(input, at),
+
         "load" | "store" => {
             let cell = cell(input, cells)?;
             let item = if name == "load" {
@@ -126,7 +153,7 @@ pub(crate) fn statement(input: ParseStream, cells: &[CellDecl]) -> syn::Result<S
             } else {
                 Item::Store(cell)
             };
-            Ok(Stmt::Item(item, at))
+            Ok(Stmt::Item(RawItem::Core(item), at))
         }
 
         "push" => base(input, at),
@@ -140,7 +167,7 @@ pub(crate) fn statement(input: ParseStream, cells: &[CellDecl]) -> syn::Result<S
 
 /// Wraps an instruction as a statement.
 fn instr(instr: impl Into<Instr>, at: Span) -> Stmt {
-    Stmt::Item(Item::Instr(instr.into()), at)
+    Stmt::Item(RawItem::Core(Item::Instr(instr.into())), at)
 }
 
 /// Whether nothing is left of the current block.
@@ -200,7 +227,7 @@ fn base(input: ParseStream, at: Span) -> syn::Result<Stmt> {
     if !input.peek(Token![.]) {
         return Err(syn::Error::new(
             at,
-            "`push` needs a width — `push8`, `push32`, `push64` — or a region, as in `push .input`",
+            "`$push` needs a region, as in `$push .input`",
         ));
     }
     input.parse::<Token![.]>()?;
@@ -218,7 +245,38 @@ fn base(input: ParseStream, at: Span) -> syn::Result<Stmt> {
         }
     };
 
-    Ok(Stmt::Item(Item::Base(region), at))
+    Ok(Stmt::Item(RawItem::Core(Item::Base(region)), at))
+}
+
+/// `field Packet::header.seq`: a type, then a dotted field path. The last `::`
+/// segment starts the path; `.` continues it.
+fn field_ref(input: ParseStream, at: Span) -> syn::Result<Stmt> {
+    let full: Path = input.parse()?;
+    if full.segments.len() < 2 {
+        return Err(syn::Error::new(
+            at,
+            "`field` needs a type and a field, as in `field Packet::header.seq`",
+        ));
+    }
+
+    let leading_colon = full.leading_colon;
+    let mut segments: Vec<_> = full.segments.into_iter().collect();
+    let Some(first) = segments.pop() else {
+        return Err(syn::Error::new(at, "`field` needs a type and a field"));
+    };
+
+    let ty = Path {
+        leading_colon,
+        segments: segments.into_iter().collect(),
+    };
+
+    let mut path = vec![first.ident];
+    while input.peek(Token![.]) {
+        input.parse::<Token![.]>()?;
+        path.push(Ident::parse_any(input)?.unraw());
+    }
+
+    Ok(Stmt::Item(RawItem::Field { ty, path }, at))
 }
 
 /// A label, keywords included: `loop:` is a perfectly good name for a block.

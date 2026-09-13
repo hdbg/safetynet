@@ -86,9 +86,11 @@ fn write_cfg(out: &mut String, cfg: &Cfg) -> core::fmt::Result {
 fn write_item(out: &mut String, item: Item) -> core::fmt::Result {
     match item {
         Item::Instr(instr) => write!(out, "{instr}"),
-        Item::Load(cell) => write!(out, "load c{}", cell.index()),
-        Item::Store(cell) => write!(out, "store c{}", cell.index()),
-        Item::Base(region) => write!(out, "push .{}", region_name(region)),
+        Item::Load(cell) => write!(out, "$load c{}", cell.index()),
+        Item::Store(cell) => write!(out, "$store c{}", cell.index()),
+        Item::Base(region) => write!(out, "$push .{}", region_name(region)),
+        // The type and path live outside the graph, so only the hole shows.
+        Item::Field(hole) => write!(out, "$field #{hole}"),
     }
 }
 

@@ -19,18 +19,18 @@ use std::fmt::Write as _;
 use safetynet::asm::print_listing;
 use safetynet::encoding::decode;
 use safetynet::image::{Image, Layout, Region, Sizes};
-use safetynet::{Artifact, ByteOrder, Le, Order, Program, Vm, WORD_SIZE, Word};
+use safetynet::{
+    Artifact, ByteOrder, Field, Le, Order, Program, TypeLayout, Vm, VmLayout, WORD_SIZE, Word,
+};
 
 /// Room for the frame, plus the few words the loop keeps live.
 const STACK: u32 = 256;
 /// Enough for the prologue plus forty instructions per byte, with room over.
 const FUEL: u64 = 10_000;
 
-/// Where the keystream starts.
-///
-/// The listing spells this number too, and so do the three below it: an operand
-/// is a literal the macro reads, not a path it can resolve, so the tests are
-/// what keeps the two copies in step.
+/// Where the keystream starts. The host marshals it into `.scratch` as
+/// `Config::seed` and the program reads it back by field, so unlike the three
+/// below it this number is not spelled in the listing.
 const SEED: Word = 0x2545_f491_4f6c_dd1d;
 /// The LCG's multiplier.
 const MUL: Word = 0x5851_f42d_4c95_7f2d;
@@ -39,20 +39,60 @@ const INC: Word = 0x1405_7b7e_f767_814f;
 /// The modulus the tag is folded through: the largest prime below `2^16`.
 const PRIME: Word = 65521;
 
-/// Word 1 of `.scratch`, where the program publishes the tag. Word 0 is the
-/// message length the host writes; the four bytes after the tag are its low
-/// half, which the program writes and reads back.
-const TAG_AT: usize = WORD_SIZE;
-/// Three words of `.scratch`: a length, a tag, and half a tag.
-const SCRATCH: u32 = 3 * WORD_SIZE as u32;
+/// Where the program publishes the tag: past the `Config` the host marshals in.
+/// The four bytes after the tag are its low half, which the program writes and
+/// reads back.
+const TAG_AT: usize = Config::SIZE;
+/// `.scratch`: the `Config`, then a tag and half a tag.
+const SCRATCH: u32 = (Config::SIZE + 2 * WORD_SIZE) as u32;
+
+/// The host's typed input: the keystream seed and the message length, marshalled
+/// into the front of `.scratch`.
+#[derive(Debug, Clone, Copy)]
+struct Config {
+    /// The keystream seed.
+    seed: Word,
+    /// How many bytes of `.input` the host wrote.
+    len: u32,
+}
+
+impl VmLayout for Config {
+    const LAYOUT: &'static TypeLayout = &TypeLayout::new(&[
+        Field::new("seed", 0, 8, None),
+        Field::new("len", 8, 4, None),
+    ]);
+    const SIZE: usize = 16;
+
+    fn marshal<B: ByteOrder>(&self, mem: &mut [u8]) {
+        if let Some(slot) = mem.get_mut(0..8) {
+            slot.copy_from_slice(&B::write_u64(self.seed));
+        }
+        if let Some(slot) = mem.get_mut(8..12) {
+            slot.copy_from_slice(&B::write_u32(self.len));
+        }
+    }
+
+    fn unmarshal<B: ByteOrder>(mem: &[u8]) -> Self {
+        let seed = mem
+            .get(0..8)
+            .and_then(|b| b.try_into().ok())
+            .map(B::read_u64)
+            .unwrap_or_default();
+        let len = mem
+            .get(8..12)
+            .and_then(|b| b.try_into().ok())
+            .map(B::read_u32)
+            .unwrap_or_default();
+        Self { seed, len }
+    }
+}
 
 /// The cipher: XOR every byte of `.input` with a keystream byte derived from
 /// the position, folding a tag over what was written.
 ///
-/// Nothing here is an address. The region bases arrive when the graph is
-/// finalized against a layout, and the one number the program cannot get that
-/// way — how many bytes the host actually wrote — it loads from `.scratch`,
-/// where the host left it.
+/// Nothing here is an address or an offset. Region bases arrive when the graph
+/// is finalized against a layout; the seed and the length come from a `Config`
+/// the host marshalled into `.scratch`, read back by field.
 ///
 /// The order is baked into the bytes at expansion, so one listing serves both
 /// through this wrapper rather than a generic function.
@@ -61,41 +101,46 @@ macro_rules! cipher_program {
         safetynet::asm!($order {
         .frame { cursor: u64, end: u64, state: u64, tag: u64, last: u8, count: u32 }
     entry:
-        push .input
-        store cursor
-        push .input
-        push .scratch
-        ld64
+        $push .input
+        $store cursor
+        $push .input
+        $push .scratch
+        $field Config::len            // the message length the host marshalled
         add
-        store end
-        push64 0x2545f4914f6cdd1d    // the seed
-        store state
+        ld32
+        add
+        $store end
+        $push .scratch                // and the seed, read back from the config
+        $field Config::seed
+        add
+        ld64
+        $store state
         push8 0
-        store tag
+        $store tag
         push8 0
-        store count
+        $store count
         push8 0
-        store last                   // every cell is written before it is read
+        $store last                   // every cell is written before it is read
     head:
-        load cursor
-        load end
+        $load cursor
+        $load end
         eq
         jnz done
     body:
         // A word of junk under the whole body: it shifts every frame
         // displacement below, and the symbolic assembler recomputes them all.
         push32 0x0badf00d
-        load state                   // state = state * MUL + INC
+        $load state                   // state = state * MUL + INC
         push64 0x5851f42d4c957f2d
         mul
         push64 0x14057b7ef767814f
         add
-        store state
-        load cursor                  // the address `st8` pops last
-        load cursor
+        $store state
+        $load cursor                  // the address `st8` pops last
+        $load cursor
         ld8
-        load state                   // k = (state ^ (state >> 33)) & 0xff
-        load state
+        $load state                   // k = (state ^ (state >> 33)) & 0xff
+        $load state
         push8 33
         shr
         xor
@@ -103,110 +148,110 @@ macro_rules! cipher_program {
         and
         xor                          // the cipher byte
         lds64 8                      // dup it for the tag
-        store last
+        $store last
         st8
-        load tag                     // tag = rotl(tag, 7) ^ byte
+        $load tag                     // tag = rotl(tag, 7) ^ byte
         push8 7
         shl
-        load tag
+        $load tag
         push8 57
         shr
         or
-        load last                    // one byte, zero-extended back to a word
+        $load last                    // one byte, zero-extended back to a word
         xor
-        store tag
-        load count                   // one more byte behind us
+        $store tag
+        $load count                   // one more byte behind us
         push8 1
         add
-        store count
-        load cursor
+        $store count
+        $load cursor
         push8 1
         add
-        store cursor
+        $store cursor
         drop                         // and the junk goes with the iteration
         jmp head
     done:
-        load state                   // fold the state's two halves under 65521
+        $load state                   // fold the state's two halves under 65521
         push32 65521
         rem
-        load state
+        $load state
         push32 65521
         div
         add
-        load tag
+        $load tag
         xor
-        store tag
-        load state                   // and the same state read as signed
+        $store tag
+        $load state                   // and the same state read as signed
         push64 0xfffffffffffffffd    // -3
         sdiv
-        load state
+        $load state
         push64 0xfffffffffffffffb    // -5
         srem
         add
-        load tag
+        $load tag
         xor
-        store tag
-        load state
+        $store tag
+        $load state
         push8 13
         sar
-        load tag
+        $load tag
         xor
-        store tag
-        load state                   // four orderings of state against tag,
-        load tag                     // packed into the low bits
+        $store tag
+        $load state                   // four orderings of state against tag,
+        $load tag                     // packed into the low bits
         lt
-        load state
-        load tag
+        $load state
+        $load tag
         le
         push8 1
         shl
         or
-        load state
-        load tag
+        $load state
+        $load tag
         slt
         push8 2
         shl
         or
-        load state
-        load tag
+        $load state
+        $load tag
         sle
         push8 3
         shl
         or
-        push .scratch                // and one the layout decides
-        push .stack
+        $push .scratch                // and one the layout decides
+        $push .stack
         lt
         push8 4
         shl
         or
-        load tag
+        $load tag
         xor
-        store tag
-        load tag
+        $store tag
+        $load tag
         not
-        store tag
-        load end                     // the bytes the loop should have walked
-        push .input
+        $store tag
+        $load end                     // the bytes the loop should have walked
+        $push .input
         sub
-        load count
+        $load count
         eq
         jz bad
     good:
-        push .scratch                // the tag, where the host can read it
-        push8 8
+        $push .scratch                // the tag, past the config
+        push8 16
         add
-        load tag
+        $load tag
         st64
-        push .scratch                // its low half, in a slot of its own
-        push8 16
+        $push .scratch                // its low half, in a slot of its own
+        push8 24
         add
-        load tag
+        $load tag
         st32
-        push .scratch
-        push8 16
+        $push .scratch
+        push8 24
         add
         ld32                         // read back zero-extended, into the result
-        load tag
+        $load tag
         add
         halt
     bad:
@@ -263,11 +308,17 @@ fn run<B: ByteOrder>(
     image
         .write(Region::Input, input)
         .ok_or("the message does not fit in .input")?;
-    // The length is the host's half of the bargain: the program reads it from
-    // here in the same order it reads everything else.
+    // The host's half of the bargain: the seed and the length, marshalled into
+    // the front of .scratch for the program to read back by field.
+    let config = Config {
+        seed: SEED,
+        len: u32::try_from(input.len())?,
+    };
+    let mut scratch = [0u8; Config::SIZE];
+    config.marshal::<B>(&mut scratch);
     image
-        .write(Region::Scratch, &B::write_u64(u64::try_from(input.len())?))
-        .ok_or("the length does not fit in .scratch")?;
+        .write(Region::Scratch, &scratch)
+        .ok_or("the config does not fit in .scratch")?;
 
     let mut vm = Vm::<B>::new(image).run(program, fuel)?;
 
@@ -377,6 +428,31 @@ mod tests {
     /// The cipher assembled big-endian, for the tests that pin the byte order.
     fn program_be() -> Artifact<Be> {
         cipher_program!(Be)
+    }
+
+    /// The config the host marshals survives a round trip in either order, so
+    /// what the program reads back is what the host put in.
+    fn config_round_trips<B: ByteOrder>() {
+        let config = Config {
+            seed: SEED,
+            len: 0x1234_5678,
+        };
+        let mut mem = [0u8; Config::SIZE];
+        config.marshal::<B>(&mut mem);
+        let back = Config::unmarshal::<B>(&mem);
+
+        assert_eq!(back.seed, config.seed);
+        assert_eq!(back.len, config.len);
+    }
+
+    #[test]
+    fn config_round_trips_le() {
+        config_round_trips::<Le>();
+    }
+
+    #[test]
+    fn config_round_trips_be() {
+        config_round_trips::<Be>();
     }
 
     /// Finalizes an artifact for a message of `len` bytes.

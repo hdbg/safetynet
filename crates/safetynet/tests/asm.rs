@@ -38,35 +38,35 @@ macro_rules! xor_loop {
         safetynet::asm!($order {
             .frame { cursor: u64, left: u64, acc: u64 }
         entry:
-            push .input
-            store cursor
+            $push .input
+            $store cursor
             push8 4
-            store left
+            $store left
             push8 0
-            store acc
+            $store acc
         head:
-            load left
+            $load left
             jz done
         body:
-            load cursor
+            $load cursor
             ld8
-            load acc
+            $load acc
             xor
-            store acc
-            load cursor
+            $store acc
+            $load cursor
             push8 1
             add
-            store cursor
-            load left
+            $store cursor
+            $load left
             push8 1
             sub
-            store left
+            $store left
             jmp head
         done:
-            push .scratch
-            load acc
+            $push .scratch
+            $load acc
             st64
-            load acc
+            $load acc
             halt
         })
     };
