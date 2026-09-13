@@ -146,6 +146,76 @@ pub(crate) fn vm_layout(input: DeriveInput) -> syn::Result<TokenStream> {
     })
 }
 
+/// `#[derive(VmValue)]`: a field-less enum is a discriminant that fits a word.
+pub(crate) fn vm_value(input: DeriveInput) -> syn::Result<TokenStream> {
+    if !input.generics.params.is_empty() {
+        return Err(syn::Error::new_spanned(
+            &input.generics,
+            "`VmValue` cannot be derived for a generic type yet",
+        ));
+    }
+
+    let name = &input.ident;
+    let variants = unit_variants(&input)?;
+    let Some(first) = variants.first() else {
+        return Err(syn::Error::new_spanned(
+            &input,
+            "`VmValue` needs at least one variant",
+        ));
+    };
+
+    // A word that matches no discriminant lands on the first variant rather than
+    // becoming an invalid enum value — untrusted input has to go somewhere safe.
+    let arms = variants.iter().map(|variant| {
+        quote! {
+            __w if __w == #name::#variant as ::safetynet::Word => #name::#variant,
+        }
+    });
+
+    Ok(quote! {
+        impl ::safetynet::__private::Sealed for #name {}
+
+        #[automatically_derived]
+        impl ::safetynet::VmValue for #name {
+            fn to_word(self) -> ::safetynet::Word {
+                self as ::safetynet::Word
+            }
+
+            fn from_word(__word: ::safetynet::Word) -> Self {
+                match __word {
+                    #(#arms)*
+                    _ => #name::#first,
+                }
+            }
+        }
+    })
+}
+
+/// The variants of a field-less enum. A data-carrying enum or a struct is
+/// refused.
+fn unit_variants(input: &DeriveInput) -> syn::Result<Vec<Ident>> {
+    let data = match &input.data {
+        Data::Enum(data) => data,
+        _ => {
+            return Err(syn::Error::new_spanned(
+                input,
+                "`VmValue` is for field-less enums; a struct is a `VmLayout`",
+            ));
+        }
+    };
+
+    data.variants
+        .iter()
+        .map(|variant| match &variant.fields {
+            Fields::Unit => Ok(variant.ident.clone()),
+            _ => Err(syn::Error::new_spanned(
+                variant,
+                "`VmValue` variants carry no data; a data-carrying enum is a `VmLayout`",
+            )),
+        })
+        .collect()
+}
+
 /// The named fields to lay out, in order. A unit struct has none; anything that
 /// is not a named-field struct is refused.
 fn fields(input: &DeriveInput) -> syn::Result<Vec<FieldDef>> {

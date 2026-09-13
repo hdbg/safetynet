@@ -2,7 +2,7 @@
 
 #![allow(clippy::expect_used)]
 
-use safetynet::{Be, ByteOrder, Field, Le, TypeLayout, VmLayout};
+use safetynet::{Be, ByteOrder, Field, Le, TypeLayout, VmLayout, VmValue};
 
 #[derive(VmLayout, Clone, Copy, Debug, PartialEq, Eq)]
 struct Header {
@@ -148,4 +148,40 @@ fn round_trips_le() {
 #[test]
 fn round_trips_be() {
     round_trips::<Be>();
+}
+
+#[derive(VmValue, Clone, Copy, Debug, PartialEq, Eq)]
+enum Kind {
+    A,
+    B,
+    C,
+}
+
+#[derive(VmValue, Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u8)]
+enum Tag {
+    Lo = 3,
+    Hi = 200,
+}
+
+/// A field-less enum round-trips through its discriminant; an unknown word lands
+/// on the first variant rather than an invalid value.
+#[test]
+fn a_unit_enum_round_trips() {
+    for kind in [Kind::A, Kind::B, Kind::C] {
+        assert_eq!(Kind::from_word(kind.to_word()), kind);
+    }
+    assert_eq!(Kind::A.to_word(), 0);
+    assert_eq!(Kind::C.to_word(), 2);
+    assert_eq!(Kind::from_word(99), Kind::A, "unknown -> first");
+}
+
+/// Explicit discriminants are the values that cross, and the gaps between them
+/// still resolve to the first variant.
+#[test]
+fn explicit_discriminants_round_trip() {
+    assert_eq!((Tag::Lo.to_word(), Tag::Hi.to_word()), (3, 200));
+    assert_eq!(Tag::from_word(3), Tag::Lo);
+    assert_eq!(Tag::from_word(200), Tag::Hi);
+    assert_eq!(Tag::from_word(0), Tag::Lo, "unknown -> first");
 }

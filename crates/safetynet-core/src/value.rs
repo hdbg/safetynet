@@ -3,7 +3,8 @@
 
 use crate::Word;
 
-mod sealed {
+pub(crate) mod sealed {
+    /// Seals [`VmValue`](super::VmValue): only this crate and its derives name it.
     pub trait Sealed {}
 }
 

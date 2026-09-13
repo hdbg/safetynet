@@ -28,6 +28,13 @@ pub use link::{FieldPatch, link_fields};
 pub use marshal::{Field, TypeLayout, VmLayout};
 pub use program::Program;
 pub use value::VmValue;
+
+/// Implementation detail of the derives; not a stable API.
+#[doc(hidden)]
+#[allow(missing_docs)]
+pub mod __private {
+    pub use crate::value::sealed::Sealed;
+}
 pub use vm::{Flow, Trap, Vm};
 pub use width::Width;
 

@@ -15,6 +15,16 @@ pub fn derive_vm_layout(input: TokenStream) -> TokenStream {
     }
 }
 
+/// Derives [`VmValue`] for a field-less enum: its discriminant to and from a
+/// word.
+#[proc_macro_derive(VmValue)]
+pub fn derive_vm_value(input: TokenStream) -> TokenStream {
+    match syn::parse(input).and_then(derive::vm_value) {
+        Ok(expansion) => expansion.into(),
+        Err(error) => error.to_compile_error().into(),
+    }
+}
+
 /// Assembles a program at compile time.
 ///
 /// Takes the byte order to lower in, then a program, and evaluates to an
