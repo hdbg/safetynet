@@ -14,13 +14,17 @@ pub mod isa;
 pub mod program;
 pub mod vm;
 
+mod marshal;
+mod value;
 mod width;
 
 pub use byte_order::{Be, ByteOrder, Le};
 pub use image::{Image, Layout, Region};
 pub use ir::{Artifact, Reloc};
 pub use isa::{FrameSize, Instr, Op};
+pub use marshal::{Field, TypeLayout, VmLayout};
 pub use program::Program;
+pub use value::VmValue;
 pub use vm::{Flow, Trap, Vm};
 pub use width::Width;
 

@@ -29,10 +29,15 @@ use super::{Block, BlockId, Cfg, Item, Terminator, Where, validate};
 use crate::encoding::{Encoder, Packed, encode, encoded_len};
 use crate::ir::{Frame, Invalid};
 use crate::isa::{Alloc, Instr, Jmp, Jnz, Jz, Lds8, Lds32, Lds64, Push32, Sts8, Sts32, Sts64};
+use crate::marshal::TypeLayout;
 use crate::{ByteOrder, FrameSize, Layout, Program, Region, Width};
 
 #[cfg(test)]
 mod tests;
+
+/// A region base or field offset both fit a narrow push: one tag byte, four for
+/// the `u32`.
+const PUSH32_LEN: usize = 5;
 
 /// Lowers a validated graph to bytecode in the standard encoding.
 pub fn finalize<B: ByteOrder>(cfg: &Cfg, layout: &Layout) -> Result<Program<B>, NotFinal> {
@@ -293,12 +298,29 @@ impl Reloc {
     /// than a borrowed encoder — because this is what a macro expansion emits and
     /// there is nothing at that point to hand it.
     pub fn region_base<B: ByteOrder>(at: usize, region: Region) -> Self {
-        // A region base is always a `Push32`: one tag byte and a fixed `u32`.
-        const PUSH32_LEN: usize = 5;
-
         Self::new(at, PUSH32_LEN, move |layout, slice| {
             let mut tmp = Vec::new();
             encode::<B>(base_push(region, layout), &mut tmp).map_err(NotFinal::encode)?;
+            copy_reencoded(&tmp, slice)
+        })
+    }
+
+    /// A field-offset relocation: re-encode `Push32 { imm: offset }` in order
+    /// `B`, where `offset` is where `path` sits in `layout`. Fails at finalize
+    /// if `path` names no field.
+    pub fn field_offset<B: ByteOrder>(
+        at: usize,
+        layout: &'static TypeLayout,
+        path: &'static [&'static str],
+    ) -> Self {
+        Self::new(at, PUSH32_LEN, move |_, slice| {
+            let offset = layout
+                .offset_of(path)
+                .ok_or_else(|| NotFinal::UnknownField {
+                    path: path.join("."),
+                })?;
+            let mut tmp = Vec::new();
+            encode::<B>(Push32 { imm: offset }.into(), &mut tmp).map_err(NotFinal::encode)?;
             copy_reencoded(&tmp, slice)
         })
     }
@@ -618,6 +640,13 @@ pub enum NotFinal {
         measured: i64,
         /// What `encode` produced.
         written: usize,
+    },
+
+    /// A field path names no field in the layout it was resolved against.
+    #[error("no field `{path}` in the layout")]
+    UnknownField {
+        /// The dotted path that did not resolve.
+        path: String,
     },
 
     /// An instruction would not encode.
