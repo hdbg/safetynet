@@ -11,5 +11,8 @@ repository.workspace = true
 safetynet-core.workspace = true
 safetynet-macros.workspace = true
 
+[dev-dependencies]
+macrotest = "1"
+
 [lints]
 workspace = true
