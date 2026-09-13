@@ -1,6 +1,8 @@
-//! Instruction samples shared by the tests in this crate.
+//! Samples shared by the tests in this crate.
 
+use crate::encoding::{DecodeError, Decoder, EncodeError, Encoder, decode, encode, encoded_len};
 use crate::isa::*;
+use crate::{ByteOrder, Instr};
 
 /// Every instruction, each carrying an operand this machine can actually run: a
 /// frame displacement that stays inside a modest prologue, and a divisor that is
@@ -59,4 +61,65 @@ pub(crate) fn instructions() -> Vec<Instr> {
         Switch.into(),
         Host { index: 3 }.into(),
     ]
+}
+
+/// A stand-in for a later, deliberately different format: the standard encoding
+/// with a filler byte after every instruction.
+///
+/// Both halves live on one type so that they cannot drift apart, which is how a
+/// real alternative format should be written too.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct Padded<B>(core::marker::PhantomData<B>);
+
+impl<B> Default for Padded<B> {
+    fn default() -> Self {
+        Self(core::marker::PhantomData)
+    }
+}
+
+/// The byte that follows every instruction.
+const FILLER: u8 = 0xff;
+
+impl<B: ByteOrder> Encoder for Padded<B> {
+    type Order = B;
+    type Error = EncodeError;
+
+    fn encode(&self, instr: Instr, out: &mut Vec<u8>) -> Result<usize, Self::Error> {
+        let written = encode::<B>(instr, out)?;
+        out.push(FILLER);
+        Ok(written + 1)
+    }
+
+    fn encoded_len(&self, instr: Instr) -> Result<usize, Self::Error> {
+        Ok(encoded_len(instr)? + 1)
+    }
+}
+
+impl<B: ByteOrder> Decoder for Padded<B> {
+    type Order = B;
+    type Error = PaddedError;
+
+    fn decode(&self, code: &[u8]) -> Result<(Instr, usize), Self::Error> {
+        let (instr, len) = decode::<B>(code)?;
+
+        // The length reported is what the fetch loop advances by, so the filler
+        // has to be counted — and checked, or a truncated stream would slide
+        // into the next instruction.
+        match code.get(len) {
+            Some(&FILLER) => Ok((instr, len + 1)),
+            _ => Err(PaddedError::MissingFiller),
+        }
+    }
+}
+
+/// Why padded bytes did not begin an instruction.
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum PaddedError {
+    /// The instruction itself did not decode.
+    #[error(transparent)]
+    Instruction(#[from] DecodeError),
+
+    /// The instruction decoded, but its filler byte is not there.
+    #[error("the filler byte is missing")]
+    MissingFiller,
 }

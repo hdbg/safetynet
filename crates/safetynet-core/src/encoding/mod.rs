@@ -225,6 +225,38 @@ impl<B: ByteOrder> Encoder for Packed<B> {
     }
 }
 
+impl<B: ByteOrder> Decoder for Packed<B> {
+    type Order = B;
+    type Error = DecodeError;
+
+    fn decode(&self, code: &[u8]) -> Result<(Instr, usize), Self::Error> {
+        decode::<B>(code)
+    }
+}
+
+/// How bytes become instructions again.
+///
+/// The other half of an [`Encoder`], and the reason they are separate traits
+/// rather than one: a disassembler needs only this side, and a machine only ever
+/// needs this side. What pairs them is a shared implementation — [`Packed`] is
+/// both — so the standard format cannot drift apart from itself.
+pub trait Decoder {
+    /// The order multi-byte operands are laid out in. Has to match the machine
+    /// running the code, which the bound on the machine's side enforces.
+    type Order: ByteOrder;
+
+    /// Why bytes did not begin an instruction.
+    type Error: core::error::Error + Send + Sync + 'static;
+
+    /// Decodes the instruction at the start of `code`, returning it and how many
+    /// bytes it occupied.
+    ///
+    /// Must stop at the end of the instruction rather than consuming `code`, and
+    /// must report the length a fetch loop should advance by — padding and
+    /// framing included, whether or not they carried anything.
+    fn decode(&self, code: &[u8]) -> Result<(Instr, usize), Self::Error>;
+}
+
 /// An instruction could not be turned into bytes.
 #[derive(Debug, thiserror::Error)]
 #[error("could not encode an instruction: {0}")]

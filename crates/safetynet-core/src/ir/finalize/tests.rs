@@ -4,6 +4,7 @@ use super::*;
 use crate::encoding::{EncodeError, Encoder, decode, encode, encoded_len};
 use crate::ir::{Frame, Terminator};
 use crate::isa::{Add, Halt, Push8, Sub, Switch};
+use crate::samples::Padded;
 use crate::vm::Vm;
 use crate::{Be, Le, Op, Width, Word};
 
@@ -293,25 +294,6 @@ fn an_invalid_graph_is_not_finalized() {
     ));
 }
 
-/// A toy stand-in for a later obfuscating format: the standard encoding with a
-/// filler byte after every instruction.
-struct Padded<B: ByteOrder>(core::marker::PhantomData<B>);
-
-impl<B: ByteOrder> Encoder for Padded<B> {
-    type Order = B;
-    type Error = EncodeError;
-
-    fn encode(&self, instr: Instr, out: &mut Vec<u8>) -> Result<usize, Self::Error> {
-        let written = encode::<B>(instr, out)?;
-        out.push(0xff);
-        Ok(written + 1)
-    }
-
-    fn encoded_len(&self, instr: Instr) -> Result<usize, Self::Error> {
-        Ok(encoded_len(instr)? + 1)
-    }
-}
-
 /// An encoder that measures one thing and writes another would move every
 /// instruction out from under the branches aimed at it.
 struct Liar;
@@ -336,7 +318,7 @@ fn layout_follows_whatever_the_encoder_measures() {
     let cfg = sum_to(3, false);
 
     let packed = finalize::<Le>(&cfg).expect("finalizes");
-    let padded = finalize_with(&cfg, &Padded::<Le>(core::marker::PhantomData)).expect("finalizes");
+    let padded = finalize_with(&cfg, &Padded::<Le>::default()).expect("finalizes");
 
     // Walking the padded stream means skipping the filler byte each time.
     let mut instructions = Vec::new();

@@ -2,12 +2,15 @@
 //! bounds it.
 
 use super::{Flow, Trap, Vm};
-use crate::encoding::decode;
+use crate::encoding::{Decoder, Packed};
 use crate::{ByteOrder, Instr};
 
 impl<B: ByteOrder> Vm<B> {
     /// Runs `code` from its first byte until it halts, spending one unit of
     /// `fuel` per instruction, and hands the machine back.
+    ///
+    /// Reads the standard encoding; [`run_with`](Vm::run_with) takes a decoder
+    /// for anything else.
     ///
     /// A program's result is the word on top of the stack when it halts, so
     /// [`pop`](Vm::pop) retrieves it. That convention lasts until marshalling
@@ -37,12 +40,28 @@ impl<B: ByteOrder> Vm<B> {
     /// assert_eq!(vm.pop()?, 42);
     /// # Ok::<_, Box<dyn std::error::Error>>(())
     /// ```
-    pub fn run(mut self, code: &[u8], fuel: u64) -> Result<Self, Trap> {
+    pub fn run(self, code: &[u8], fuel: u64) -> Result<Self, Trap> {
+        self.run_with(code, &Packed::<B>::new(), fuel)
+    }
+
+    /// Runs `code` through `decoder`.
+    ///
+    /// The decoder's order is pinned to the machine's, so a program cannot be
+    /// read in one order and executed in another. It must be the counterpart of
+    /// whatever encoder laid the program out: this loop trusts the length it
+    /// reports to find the next instruction, and a relative branch is measured
+    /// against that same boundary.
+    pub fn run_with<D: Decoder<Order = B>>(
+        mut self,
+        code: &[u8],
+        decoder: &D,
+        fuel: u64,
+    ) -> Result<Self, Trap> {
         let mut fuel = fuel;
         let mut pc = 0;
 
         loop {
-            let (instr, len) = Self::fetch(code, pc)?;
+            let (instr, len) = fetch(code, pc, decoder)?;
             fuel = fuel.checked_sub(1).ok_or(Trap::OutOfFuel)?;
 
             // The offset a branch is measured from, and where execution
@@ -55,19 +74,6 @@ impl<B: ByteOrder> Vm<B> {
                 Flow::Halt => return Ok(self),
             };
         }
-    }
-
-    /// Decodes the instruction at `pc`.
-    fn fetch(code: &[u8], pc: usize) -> Result<(Instr, usize), Trap> {
-        let rest = code.get(pc..).ok_or(Trap::CodeOutOfRange { offset: pc })?;
-
-        // Nothing left to decode means the last instruction was not a `HALT`;
-        // that is a program that never stopped, not a malformed one.
-        if rest.is_empty() {
-            return Err(Trap::CodeOutOfRange { offset: pc });
-        }
-
-        decode::<B>(rest).map_err(|_| Trap::BadInstruction { offset: pc })
     }
 
     /// Resolves a branch to the offset it lands on.
@@ -95,6 +101,21 @@ impl<B: ByteOrder> Vm<B> {
 
         Ok(target)
     }
+}
+
+/// Decodes the instruction at `pc`.
+fn fetch<D: Decoder>(code: &[u8], pc: usize, decoder: &D) -> Result<(Instr, usize), Trap> {
+    let rest = code.get(pc..).ok_or(Trap::CodeOutOfRange { offset: pc })?;
+
+    // Nothing left to decode means the last instruction was not a `HALT`; that
+    // is a program that never stopped, not a malformed one.
+    if rest.is_empty() {
+        return Err(Trap::CodeOutOfRange { offset: pc });
+    }
+
+    decoder
+        .decode(rest)
+        .map_err(|_| Trap::BadInstruction { offset: pc })
 }
 
 #[cfg(test)]
@@ -250,5 +271,92 @@ mod tests {
         ];
 
         assert_eq!(eval::<Le>(&program), Err(Trap::DivideByZero));
+    }
+}
+
+#[cfg(test)]
+mod format_tests {
+    use super::*;
+    use crate::Width;
+    use crate::ir::{Cfg, Frame, Terminator, finalize_with};
+    use crate::isa::{Add, Push8};
+    use crate::samples::Padded;
+    use crate::{Be, Le};
+
+    /// A program laid out in one format and read back in the same one, with the
+    /// machine never learning which format that was.
+    ///
+    /// The two halves have to agree about lengths or nothing works: the loop
+    /// finds each instruction at the boundary the previous one reported, and
+    /// every branch offset was resolved against those same boundaries.
+    fn another_format_runs_end_to_end<B: ByteOrder>() {
+        let mut frame = Frame::new();
+        let total = frame.add(Width::U64).expect("room");
+
+        let mut builder = Cfg::builder(frame);
+        let entry = builder.block(0);
+        let body = builder.block(0);
+
+        builder
+            .at(entry)
+            .expect("open")
+            .instr(Push8 { imm: 40 })
+            .store(total);
+        builder.seal(entry, Terminator::Jmp(body)).expect("seals");
+
+        builder
+            .at(body)
+            .expect("open")
+            .load(total)
+            .instr(Push8 { imm: 2 })
+            .instr(Add);
+        builder.seal(body, Terminator::Halt).expect("seals");
+
+        let cfg = builder.build(entry).expect("builds");
+        let format = Padded::<B>::default();
+        let program = finalize_with(&cfg, &format).expect("finalizes");
+
+        let packed = crate::ir::finalize::<B>(&cfg).expect("finalizes");
+        assert!(
+            program.code().len() > packed.code().len(),
+            "the padding is really there"
+        );
+
+        let vm = Vm::<B>::new(vec![0; 256], 0).expect("a valid stack");
+        let mut vm = vm
+            .run_with(program.code(), &format, 1000)
+            .expect("terminates");
+
+        assert_eq!(vm.pop(), Ok(42));
+    }
+
+    #[test]
+    fn another_format_runs_end_to_end_le() {
+        another_format_runs_end_to_end::<Le>();
+    }
+
+    #[test]
+    fn another_format_runs_end_to_end_be() {
+        another_format_runs_end_to_end::<Be>();
+    }
+
+    /// The standard encoding is not special to the machine: reading a padded
+    /// program with the standard decoder walks into the filler and stops.
+    #[test]
+    fn the_wrong_decoder_does_not_quietly_work() {
+        let mut builder = Cfg::builder(Frame::new());
+        let entry = builder.block(0);
+        builder.at(entry).expect("open").instr(Push8 { imm: 7 });
+        builder.seal(entry, Terminator::Halt).expect("seals");
+
+        let cfg = builder.build(entry).expect("builds");
+        let program = finalize_with(&cfg, &Padded::<Le>::default()).expect("finalizes");
+
+        let vm = Vm::<Le>::new(vec![0; 256], 0).expect("a valid stack");
+        assert_eq!(
+            vm.run(program.code(), 1000).err(),
+            Some(Trap::BadInstruction { offset: 2 }),
+            "the filler after the first instruction is not an opcode"
+        );
     }
 }
