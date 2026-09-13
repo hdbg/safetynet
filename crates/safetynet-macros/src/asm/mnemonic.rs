@@ -67,7 +67,7 @@ pub(crate) fn statement(input: ParseStream, cells: &[CellDecl]) -> syn::Result<S
     let at = word.span();
     let name = word.unraw().to_string();
 
-    let is_meta = matches!(name.as_str(), "load" | "store" | "field" | "push");
+    let is_meta = matches!(name.as_str(), "load" | "store" | "field" | "tag" | "push");
     if meta && !is_meta {
         return Err(syn::Error::new(
             at,
@@ -145,6 +145,7 @@ pub(crate) fn statement(input: ParseStream, cells: &[CellDecl]) -> syn::Result<S
         "switch" => Ok(instr(Switch, at)),
 
         "field" => field_ref(input, at),
+        "tag" => tag_ref(input, at),
 
         "load" | "store" => {
             let cell = cell(input, cells)?;
@@ -277,6 +278,19 @@ fn field_ref(input: ParseStream, at: Span) -> syn::Result<Stmt> {
     }
 
     Ok(Stmt::Item(RawItem::Field { ty, path }, at))
+}
+
+/// `$tag Kind::Variant`: an enum variant, whose discriminant word the call site
+/// resolves.
+fn tag_ref(input: ParseStream, at: Span) -> syn::Result<Stmt> {
+    let path: Path = input.parse()?;
+    if path.segments.len() < 2 {
+        return Err(syn::Error::new(
+            at,
+            "`tag` needs a type and a variant, as in `tag Kind::Variant`",
+        ));
+    }
+    Ok(Stmt::Item(RawItem::Tag(path), at))
 }
 
 /// A label, keywords included: `loop:` is a perfectly good name for a block.

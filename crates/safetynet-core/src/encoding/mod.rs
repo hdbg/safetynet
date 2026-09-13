@@ -30,7 +30,7 @@ use musli::options::{self, ByteOrder as MusliOrder, Integer, Options};
 use musli::storage::{Encoding, Error as WireError};
 use musli::{Context, Writer};
 
-use crate::isa::Push32;
+use crate::isa::{Push32, Push64};
 use crate::{ByteOrder, Instr};
 
 #[cfg(test)]
@@ -138,33 +138,61 @@ pub struct Immediate {
 /// Probes `encoder` for where a `push32`'s immediate sits and how it is ordered.
 ///
 /// Derived rather than assumed, so a linker can patch the immediate without
-/// baking in the wire format. `None` if the encoder does not lay a `push32` out
+/// baking in the wire format. `None` if the encoder does not lay the push out
 /// as a contiguous fixed-width immediate.
 pub fn push32_immediate<E: Encoder>(encoder: &E) -> Option<Immediate> {
-    let probe = |imm: u32| {
+    immediate_of(
+        encoder,
+        Push32 { imm: 0 }.into(),
+        Push32 { imm: u32::MAX }.into(),
+        Push32 { imm: 1 }.into(),
+    )
+}
+
+/// Probes `encoder` for where a `push64`'s immediate sits and how it is ordered.
+///
+/// The `push64` counterpart of [`push32_immediate`], for a word-wide hole such
+/// as an enum discriminant.
+pub fn push64_immediate<E: Encoder>(encoder: &E) -> Option<Immediate> {
+    immediate_of(
+        encoder,
+        Push64 { imm: 0 }.into(),
+        Push64 { imm: u64::MAX }.into(),
+        Push64 { imm: 1 }.into(),
+    )
+}
+
+/// Locates the immediate an instruction carries by encoding three values of it:
+/// `zero`, `full` (every bit set) and `one`.
+///
+/// The immediate is the run of bytes `full` changes from `zero`; its low byte is
+/// the single byte `one` changes. `None` if that run is not contiguous.
+fn immediate_of<E: Encoder>(
+    encoder: &E,
+    zero: Instr,
+    full: Instr,
+    one: Instr,
+) -> Option<Immediate> {
+    let probe = |instr| {
         let mut out = Vec::new();
-        encoder.encode(Push32 { imm }.into(), &mut out).ok()?;
+        encoder.encode(instr, &mut out).ok()?;
         Some(out)
     };
 
-    let base = probe(0)?;
-    let full = probe(u32::MAX)?;
-    let one = probe(1)?;
-    if base.len() != full.len() || base.len() != one.len() {
+    let (zero, full, one) = (probe(zero)?, probe(full)?, probe(one)?);
+    if zero.len() != full.len() || zero.len() != one.len() {
         return None;
     }
 
-    // The immediate is where flipping every bit changed a byte; its low byte is
-    // where a value of one landed.
     let mut at = None;
     let mut width = 0;
     let mut low = None;
-    for i in 0..base.len() {
-        if base.get(i) != full.get(i) {
+    for i in 0..zero.len() {
+        if zero.get(i) != full.get(i) {
             at.get_or_insert(i);
             width += 1;
         }
-        if base.get(i) != one.get(i) {
+        if zero.get(i) != one.get(i) {
             if low.is_some() {
                 return None;
             }

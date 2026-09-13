@@ -60,6 +60,12 @@ impl BlockBody {
         self
     }
 
+    /// Appends a discriminant hole, named by `hole`.
+    pub fn tag(&mut self, hole: u32) -> &mut Self {
+        self.code.push(Item::Tag(hole));
+        self
+    }
+
     /// What has been written so far.
     pub fn code(&self) -> &[Item] {
         &self.code

@@ -32,6 +32,8 @@ pub(crate) struct Lowered {
     pub(crate) cfg: Cfg,
     /// Field references, indexed by the hole id in [`Item::Field`].
     pub(crate) field_refs: Vec<FieldRef>,
+    /// Enum-variant references, indexed by the hole id in [`Item::Tag`].
+    pub(crate) tag_refs: Vec<TagRef>,
     spans: SpanTable,
     names: Names,
 }
@@ -41,6 +43,12 @@ pub(crate) struct Lowered {
 pub(crate) struct FieldRef {
     pub(crate) ty: Path,
     pub(crate) path: Vec<Ident>,
+}
+
+/// A variant reference the call site resolves to a discriminant word.
+#[derive(Debug)]
+pub(crate) struct TagRef {
+    pub(crate) path: Path,
 }
 
 impl Lowered {
@@ -124,6 +132,7 @@ pub(crate) fn lower(program: Program) -> syn::Result<Lowered> {
     let ids: Vec<BlockId> = depths.iter().map(|depth| builder.block(*depth)).collect();
 
     let mut field_refs = Vec::new();
+    let mut tag_refs = Vec::new();
     for ((block, term), id) in blocks.into_iter().zip(terms).zip(&ids) {
         let body = builder.at(*id).map_err(internal)?;
         for (item, _) in block.items {
@@ -143,6 +152,9 @@ pub(crate) fn lower(program: Program) -> syn::Result<Lowered> {
                 RawItem::Core(Item::Field(hole)) => {
                     body.field(hole);
                 }
+                RawItem::Core(Item::Tag(hole)) => {
+                    body.tag(hole);
+                }
                 RawItem::Field { ty, path } => {
                     let hole = u32::try_from(field_refs.len()).map_err(|_| {
                         syn::Error::new(
@@ -152,6 +164,16 @@ pub(crate) fn lower(program: Program) -> syn::Result<Lowered> {
                     })?;
                     body.field(hole);
                     field_refs.push(FieldRef { ty, path });
+                }
+                RawItem::Tag(path) => {
+                    let hole = u32::try_from(tag_refs.len()).map_err(|_| {
+                        syn::Error::new(
+                            Span::call_site(),
+                            "this program has too many tag references",
+                        )
+                    })?;
+                    body.tag(hole);
+                    tag_refs.push(TagRef { path });
                 }
             }
         }
@@ -167,6 +189,7 @@ pub(crate) fn lower(program: Program) -> syn::Result<Lowered> {
             .map_err(|_| syn::Error::new(Span::call_site(), "this program has too many blocks"))?,
         cfg,
         field_refs,
+        tag_refs,
         spans,
         names,
     })

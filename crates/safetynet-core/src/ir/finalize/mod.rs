@@ -28,7 +28,9 @@ use std::borrow::Cow;
 use super::{Block, BlockId, Cfg, Item, Terminator, Where, validate};
 use crate::encoding::{Encoder, Packed, encoded_len};
 use crate::ir::{Frame, Invalid};
-use crate::isa::{Alloc, Instr, Jmp, Jnz, Jz, Lds8, Lds32, Lds64, Push32, Sts8, Sts32, Sts64};
+use crate::isa::{
+    Alloc, Instr, Jmp, Jnz, Jz, Lds8, Lds32, Lds64, Push32, Push64, Sts8, Sts32, Sts64,
+};
 use crate::{ByteOrder, FrameSize, Layout, Program, Region, Width};
 
 #[cfg(test)]
@@ -71,6 +73,8 @@ pub struct Resolved {
     relocs: Vec<BaseReloc>,
     /// The field-offset pushes whose immediate a layout still owes.
     field_relocs: Vec<FieldReloc>,
+    /// The discriminant pushes whose immediate the type still owes.
+    tag_relocs: Vec<TagReloc>,
     /// The branches and where each block starts, kept so an encoder that changes
     /// instruction sizes can recompute the offsets against its own measurements.
     patches: Vec<Patch>,
@@ -98,6 +102,11 @@ impl Resolved {
     pub fn field_relocs(&self) -> &[FieldReloc] {
         &self.field_relocs
     }
+
+    /// The discriminant relocations, each naming an instruction and its hole.
+    pub fn tag_relocs(&self) -> &[TagReloc] {
+        &self.tag_relocs
+    }
 }
 
 /// A region-base push whose immediate is filled in once a layout is chosen.
@@ -118,6 +127,15 @@ pub struct FieldReloc {
     pub hole: u32,
 }
 
+/// A discriminant push whose immediate is filled in from an enum type.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TagReloc {
+    /// Index of the push in [`Resolved::code`].
+    pub index: usize,
+    /// Names the hole; what it resolves to lives outside the graph.
+    pub hole: u32,
+}
+
 /// Validates a graph and resolves it to instructions, without a byte order.
 ///
 /// Everything but a region's base is decided here, so the result is the same
@@ -132,6 +150,7 @@ pub fn resolve(cfg: &Cfg) -> Result<Resolved, NotFinal> {
         starts,
         relocs,
         field_relocs,
+        tag_relocs,
     } = emit(cfg, &order)?;
 
     // Branch offsets, computed against the standard packed sizes. Order does not
@@ -146,6 +165,7 @@ pub fn resolve(cfg: &Cfg) -> Result<Resolved, NotFinal> {
         frame: cfg.frame().size(),
         relocs,
         field_relocs,
+        tag_relocs,
         patches,
         starts,
     })
@@ -168,9 +188,9 @@ pub fn assemble_with<E: Encoder + Clone + 'static>(
 ) -> Result<Artifact<E::Order>, NotFinal> {
     let resolved = resolve(cfg)?;
 
-    // Field offsets need an aggregate's layout, which this path does not carry;
-    // only an assembler that knows the type can resolve them.
-    if !resolved.field_relocs.is_empty() {
+    // Field offsets and discriminants need a type, which this path does not
+    // carry; only an assembler that knows the type can resolve them.
+    if !resolved.field_relocs.is_empty() || !resolved.tag_relocs.is_empty() {
         return Err(NotFinal::FieldWithoutLayout);
     }
 
@@ -402,6 +422,8 @@ struct Emitted {
     relocs: Vec<BaseReloc>,
     /// The field-offset holes left as placeholders.
     field_relocs: Vec<FieldReloc>,
+    /// The discriminant holes left as placeholders.
+    tag_relocs: Vec<TagReloc>,
 }
 
 /// A branch whose offset is not known until every instruction has been measured.
@@ -441,6 +463,7 @@ fn emit(cfg: &Cfg, order: &[BlockId]) -> Result<Emitted, NotFinal> {
     let mut patches = Vec::new();
     let mut relocs = Vec::new();
     let mut field_relocs = Vec::new();
+    let mut tag_relocs = Vec::new();
     let mut starts = vec![0; cfg.blocks().len()];
 
     // The prologue, reserving the frame the whole graph shares. There is no
@@ -472,6 +495,10 @@ fn emit(cfg: &Cfg, order: &[BlockId]) -> Result<Emitted, NotFinal> {
                     region,
                 }),
                 Item::Field(hole) => field_relocs.push(FieldReloc {
+                    index: code.len(),
+                    hole,
+                }),
+                Item::Tag(hole) => tag_relocs.push(TagReloc {
                     index: code.len(),
                     hole,
                 }),
@@ -522,6 +549,7 @@ fn emit(cfg: &Cfg, order: &[BlockId]) -> Result<Emitted, NotFinal> {
         starts,
         relocs,
         field_relocs,
+        tag_relocs,
     })
 }
 
@@ -580,6 +608,8 @@ fn materialize(frame: &Frame, item: Item, depth: u32, at: Where) -> Result<Instr
         Item::Instr(instr) => return Ok(instr),
         // The address or offset arrives at finalize; a zero holds its place.
         Item::Base(_) | Item::Field(_) => return Ok(Push32 { imm: 0 }.into()),
+        // A discriminant is a whole word, so it holds a wider place.
+        Item::Tag(_) => return Ok(Push64 { imm: 0 }.into()),
         Item::Load(cell) => (cell, false),
         Item::Store(cell) => (cell, true),
     };

@@ -37,6 +37,7 @@ pub(crate) struct CellDecl {
 pub(crate) enum RawItem {
     Core(Item),
     Field { ty: Path, path: Vec<Ident> },
+    Tag(Path),
 }
 
 impl RawItem {
@@ -45,6 +46,7 @@ impl RawItem {
         match self {
             Self::Core(item) => item.sp_delta(),
             Self::Field { .. } => Item::Field(0).sp_delta(),
+            Self::Tag(_) => Item::Tag(0).sp_delta(),
         }
     }
 }

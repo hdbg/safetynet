@@ -21,8 +21,8 @@ mod validate;
 
 pub use builder::{BlockBody, BuildError, Builder};
 pub use finalize::{
-    Artifact, BaseReloc, FieldReloc, NotFinal, Reloc, Resolved, assemble, assemble_with, finalize,
-    finalize_with, resolve,
+    Artifact, BaseReloc, FieldReloc, NotFinal, Reloc, Resolved, TagReloc, assemble, assemble_with,
+    finalize, finalize_with, resolve,
 };
 pub use frame::{Cell, CellId, Frame};
 pub use validate::{Invalid, Limits, Where, validate, validate_with};
@@ -72,6 +72,9 @@ pub enum Item {
     /// known. The `u32` names the hole; what it resolves to lives outside the
     /// graph.
     Field(u32),
+    /// Push an enum variant's discriminant word, resolved once the type is
+    /// known. The `u32` names the hole, like [`Item::Field`].
+    Tag(u32),
 }
 
 impl Item {
@@ -89,7 +92,7 @@ impl Item {
             Self::Instr(instr) => instr.sp_delta(),
             Self::Load(_) => Lds64 { disp: 0 }.sp_delta(),
             Self::Store(_) => Sts64 { disp: 0 }.sp_delta(),
-            Self::Base(_) | Self::Field(_) => Push32 { imm: 0 }.sp_delta(),
+            Self::Base(_) | Self::Field(_) | Self::Tag(_) => Push32 { imm: 0 }.sp_delta(),
         }
     }
 }

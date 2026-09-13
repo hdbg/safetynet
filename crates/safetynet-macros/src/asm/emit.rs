@@ -9,7 +9,7 @@
 
 use proc_macro2::{Literal, TokenStream};
 use quote::quote;
-use safetynet_core::encoding::{Packed, encode, push32_immediate};
+use safetynet_core::encoding::{Packed, encode, push32_immediate, push64_immediate};
 use safetynet_core::ir::resolve;
 use safetynet_core::{Be, Le, Region};
 use syn::Path;
@@ -18,6 +18,7 @@ use syn::spanned::Spanned;
 use super::Lowered;
 
 /// The two byte orders the macro can encode against at expansion.
+#[derive(Clone, Copy)]
 enum Order {
     Le,
     Be,
@@ -67,46 +68,85 @@ pub(crate) fn emit(order: &Path, lowered: &Lowered) -> syn::Result<TokenStream> 
         });
     }
 
-    // Where a push32's immediate lands and how it is ordered, probed from the
+    // Where each push's immediate lands and how it is ordered, probed from the
     // very encoder that wrote the bytes above — the linker patches into that
-    // rather than assuming a shape.
-    let immediate = match which {
-        Order::Le => push32_immediate(&Packed::<Le>::new()),
-        Order::Be => push32_immediate(&Packed::<Be>::new()),
-    }
-    .ok_or_else(|| syn::Error::new(order.span(), "the encoder has no push32 immediate to patch"))?;
-    let width = Literal::usize_suffixed(immediate.width);
-    let big_endian = immediate.big_endian;
+    // rather than assuming a shape. Field offsets ride a push32, discriminants a
+    // push64.
+    let immediate = |wide: bool| match (which, wide) {
+        (Order::Le, false) => push32_immediate(&Packed::<Le>::new()),
+        (Order::Be, false) => push32_immediate(&Packed::<Be>::new()),
+        (Order::Le, true) => push64_immediate(&Packed::<Le>::new()),
+        (Order::Be, true) => push64_immediate(&Packed::<Be>::new()),
+    };
+    let missing = |wide: bool| {
+        let push = if wide { "push64" } else { "push32" };
+        syn::Error::new(
+            order.span(),
+            format!("the encoder has no {push} immediate to patch"),
+        )
+    };
+    let at_of = |imm: &safetynet_core::Immediate, index: usize| {
+        Literal::usize_suffixed(offsets.get(index).copied().unwrap_or_default() + imm.at)
+    };
 
     let mut patches = Vec::new();
-    for reloc in resolved.field_relocs() {
-        let push_at = offsets.get(reloc.index).copied().unwrap_or_default();
-        let at = Literal::usize_suffixed(push_at + immediate.at);
-        let field = lowered.field_refs.get(reloc.hole as usize).ok_or_else(|| {
-            syn::Error::new(
-                order.span(),
-                "a field reference went missing while assembling",
-            )
-        })?;
-        let ty = &field.ty;
-        let names = field
-            .path
-            .iter()
-            .map(|name| Literal::string(&name.to_string()));
-        patches.push(quote! {
-            ::safetynet::FieldPatch {
-                at: #at,
-                width: #width,
-                big_endian: #big_endian,
-                layout: <#ty as ::safetynet::VmLayout>::LAYOUT,
-                path: &[#(#names),*],
-            }
-        });
+
+    if !resolved.field_relocs().is_empty() {
+        let imm = immediate(false).ok_or_else(|| missing(false))?;
+        let (width, big_endian) = (Literal::usize_suffixed(imm.width), imm.big_endian);
+        for reloc in resolved.field_relocs() {
+            let at = at_of(&imm, reloc.index);
+            let field = lowered.field_refs.get(reloc.hole as usize).ok_or_else(|| {
+                syn::Error::new(
+                    order.span(),
+                    "a field reference went missing while assembling",
+                )
+            })?;
+            let ty = &field.ty;
+            let names = field
+                .path
+                .iter()
+                .map(|name| Literal::string(&name.to_string()));
+            patches.push(quote! {
+                ::safetynet::Patch {
+                    at: #at,
+                    width: #width,
+                    big_endian: #big_endian,
+                    hole: ::safetynet::Hole::Field {
+                        layout: <#ty as ::safetynet::VmLayout>::LAYOUT,
+                        path: &[#(#names),*],
+                    },
+                }
+            });
+        }
+    }
+
+    if !resolved.tag_relocs().is_empty() {
+        let imm = immediate(true).ok_or_else(|| missing(true))?;
+        let (width, big_endian) = (Literal::usize_suffixed(imm.width), imm.big_endian);
+        for reloc in resolved.tag_relocs() {
+            let at = at_of(&imm, reloc.index);
+            let tag = lowered.tag_refs.get(reloc.hole as usize).ok_or_else(|| {
+                syn::Error::new(
+                    order.span(),
+                    "a tag reference went missing while assembling",
+                )
+            })?;
+            let path = &tag.path;
+            patches.push(quote! {
+                ::safetynet::Patch {
+                    at: #at,
+                    width: #width,
+                    big_endian: #big_endian,
+                    hole: ::safetynet::Hole::Word(#path as ::safetynet::Word),
+                }
+            });
+        }
     }
 
     Ok(quote! {
         {
-            const CODE: &[u8] = &::safetynet::link_fields::<#len>(
+            const CODE: &[u8] = &::safetynet::link::<#len>(
                 [#(#raw),*],
                 &[#(#patches),*],
             );

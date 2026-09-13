@@ -141,7 +141,7 @@ fn check_item(cfg: &Cfg, at: Where, item: Item, depth: u32) -> Result<(), Invali
         Item::Instr(Instr::Alloc(_) | Instr::Free(_)) => return Err(Invalid::FrameOp { at }),
         // A region's address is resolved from the image layout, which this
         // pass has no opinion about.
-        Item::Instr(_) | Item::Base(_) | Item::Field(_) => return Ok(()),
+        Item::Instr(_) | Item::Base(_) | Item::Field(_) | Item::Tag(_) => return Ok(()),
         Item::Load(cell) | Item::Store(cell) => cell,
     };
 

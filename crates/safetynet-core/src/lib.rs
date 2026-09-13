@@ -20,11 +20,11 @@ mod value;
 mod width;
 
 pub use byte_order::{Be, ByteOrder, Le};
-pub use encoding::{Immediate, push32_immediate};
+pub use encoding::{Immediate, push32_immediate, push64_immediate};
 pub use image::{Image, Layout, Region};
 pub use ir::{Artifact, Reloc};
 pub use isa::{FrameSize, Instr, Op};
-pub use link::{FieldPatch, link_fields};
+pub use link::{Hole, Patch, link};
 pub use marshal::{Field, TypeLayout, VmLayout};
 pub use program::Program;
 pub use value::VmValue;
