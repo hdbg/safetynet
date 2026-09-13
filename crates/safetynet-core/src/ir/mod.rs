@@ -16,9 +16,11 @@
 
 mod builder;
 mod frame;
+mod validate;
 
 pub use builder::{BlockBody, BuildError, Builder};
 pub use frame::{Cell, CellId, Frame};
+pub use validate::{Invalid, Limits, Where, validate, validate_with};
 
 use crate::{Instr, WORD_SIZE};
 
@@ -36,6 +38,11 @@ impl BlockId {
     /// Position of the block in its graph.
     pub const fn index(self) -> usize {
         self.0 as usize
+    }
+
+    /// The block at `index`, for walking a graph by position.
+    pub(crate) const fn from_index(index: usize) -> Self {
+        Self(index as u32)
     }
 }
 
