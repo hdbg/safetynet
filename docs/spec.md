@@ -43,7 +43,7 @@ a VM fault but is really an encoding mismatch.
 ```
 safetynet-core     opcode table (define_ops!), IR types, traits, byte-order
                    policy, layout descriptors, assembler, interpreter
-safetynet-macros   proc-macros: #[safetynet], #[derive(VmLayout)], sn_asm!
+safetynet-macros   proc-macros: #[safetynet], #[derive(VmLayout)], safetynet::asm!
                    (thin; each builds a Cfg and calls core's pipeline)
 safetynet          façade re-exporting core + macros
 ```
@@ -128,7 +128,7 @@ sequence inlined at each site.
 
 **The order is named literally at the source, never by cargo feature.** `Le` is
 the compiled-in default; anything else is written at the site —
-`#[safetynet(order = Be)]`, `sn_asm!(Be { … })`. `safetynet::Order` exists as an
+`#[safetynet(order = Be)]`, `safetynet::asm!(Be { … })`. `safetynet::Order` exists as an
 alias for the default so signatures can spell it, but it is documentation, not
 configuration: the macro bakes `.rodata` bytes at expansion time and therefore
 needs a *concrete* order in hand, so it resolves the default itself rather than
@@ -249,7 +249,7 @@ the same order as everything else in the image.
 
 Every op is declared once, in a `define_ops!` table that generates the structs,
 the `Instr` enum with forwarding methods, the decode dispatch, and the mnemonic
-table shared by `sn_asm!` (§8.1) and the disassembler. `Instr` carries inherent
+table shared by `safetynet::asm!` (§8.1) and the disassembler. `Instr` carries inherent
 methods rather than `impl Op`: `OPCODE` and `MNEMONIC` are associated consts, and
 an enum ranging over the whole instruction set has no single value for either.
 The names and meanings are the same.
@@ -569,9 +569,9 @@ lowering mistake is a spanned error rather than a wrong answer — which matters
 more than it did when locals were absolutely indexed, because the failure mode
 has changed from a runaway to a silent misread (§R9).
 
-### 8.1 `sn_asm!` — textual front-end to the CFG
+### 8.1 `safetynet::asm!` — textual front-end to the CFG
 
-`sn_asm!` is a proc-macro that takes assembly-like source with **jump labels**,
+`safetynet::asm!` is a proc-macro that takes assembly-like source with **jump labels**,
 resolves it to a `Cfg`, validates it, and finalizes it to a `Program<B>`. It
 computes no byte offsets of its own: labels become `BlockId` edges, and offsets
 appear only where they already appeared, in finalization.
@@ -593,7 +593,7 @@ it. That is the dogfooding guarantee, bought without putting a parser on the
 production path (§R10).
 
 ```rust
-const PROG: Program<Le> = sn_asm!(Le {
+const PROG: Program<Le> = safetynet::asm!(Le {
     .frame   i: u32, acc: u8          // cells; the macro assigns byte offsets
     .rodata  KEY: [u8; 5] = [0x1f, 0x8b, 0x00, 0x5a, 0xc3]
 
@@ -658,7 +658,7 @@ Rules:
   exercised before either the lowerer or the derive exists.
 - **Validation is the macro's job.** SP invariant, single terminator, edge
   consistency, unknown or duplicate label, unknown cell, wrong arity — every
-  failure is a `syn::Error` on the offending token at expansion time. `sn_asm!`
+  failure is a `syn::Error` on the offending token at expansion time. `safetynet::asm!`
   runs entirely proc-macro-side, so like the rest of the assembler (§10) it is
   categorically absent from the target binary.
 - **Byte order is the macro's first argument** and becomes the `B` of the emitted
@@ -693,7 +693,7 @@ Why this earns a phase of its own, ahead of the lowerer:
 Two front-ends, one backend — and the backend is a library, not a macro:
 
 ```
- syn::ItemFn                             sn_asm! source (§8.1)
+ syn::ItemFn                             safetynet::asm! source (§8.1)
    │  parse + subset check               │  parse; labels → BlockId edges
    │  (spanned errors)                   │  (spanned errors)
    ▼                                     ▼
@@ -717,7 +717,7 @@ is a type parameter of finalization rather than a flag read inside it.
 **The join is a typed API in `core`, not a text format.** Both macros construct a
 `Cfg` and hand it to the same `validate` → `passes` → `finalize<B>` chain, so
 everything from validation down has one implementation and one test suite. The
-tempting alternative — have `#[safetynet]` emit `sn_asm!` source and let rustc
+tempting alternative — have `#[safetynet]` emit `safetynet::asm!` source and let rustc
 expand it — was considered and rejected; §R10 records why, and §8.1's round-trip
 property recovers the parity argument that alternative was reaching for.
 
@@ -779,7 +779,7 @@ Applied to a function — or to a module, when intra-module calls are to be inli
    or the `order = …` argument).
 3. **Embedded program** — bytecode + image (see §10), built by calling `core`'s
    pipeline during expansion. `SN_DUMP_ASM=1` additionally prints the lowered
-   program as `sn_asm!` source (§8.1) for inspection; it is a debugging output,
+   program as `safetynet::asm!` source (§8.1) for inspection; it is a debugging output,
    not a build input.
 4. **Bound assertions** — the `VmValue` dead-code checks.
 5. **Differential harness** — `#[cfg(test)]` comparing reference and VM.
@@ -792,7 +792,7 @@ fn check(pkt: Packet) -> u32 { /* normal Rust */ }
 
 The lowerer can still be tested without running a VM — lower, `print`, compare
 against a readable asm fixture — and the author can read what their function
-became and paste that asm into an `sn_asm!` test verbatim when it looks wrong.
+became and paste that asm into an `safetynet::asm!` test verbatim when it looks wrong.
 The difference from routing the build through that text is that here the text is
 an observation of the pipeline, not a stage in it.
 
@@ -874,7 +874,7 @@ recomputes every displacement against the new SP. What a pass *must* preserve is
 pass, not the build, when it does not. Layout-level obfuscation (block reorder,
 opcode renumbering, frame-cell/const permutation) lives in finalization; semantic
 passes (opaque predicates best value) in the seam. Per-seed differential testing
-is mandatory once this exists, and `sn_asm!` disassembly gives each pass a
+is mandatory once this exists, and `safetynet::asm!` disassembly gives each pass a
 readable before/after diff to assert on.
 
 ---
@@ -903,7 +903,7 @@ Each phase ends runnable and tested; the two harnesses grow continuously.
   template form. Hand-built CFGs run on the Phase-1 interpreter. Done when a
   program with junk pushes inserted mid-block still resolves every local
   correctly.
-- **Phase 3 — Macro-assembler (`sn_asm!`).** Labels → `Cfg` → validate → finalize
+- **Phase 3 — Macro-assembler (`safetynet::asm!`).** Labels → `Cfg` → validate → finalize
   → `Program<B>`, every failure a spanned error; the `print` half (disassembler)
   and the `parse → encode → decode → print → parse` fixed-point test, both orders
   (§8.1). `print`/`parse` must cover everything the IR can hold — enforced from
@@ -917,7 +917,7 @@ Each phase ends runnable and tested; the two harnesses grow continuously.
 - **Phase 4 — Traits + marshalling (no macro).** `VmValue`, `VmLayout`, memory
   map, `marshal<B>`/`unmarshal<B>`, `const fn` linker, and a **hand-written
   `VmLayout`** to validate the contract before the derive exists; field-hole
-  relocation exercised from `sn_asm!`.
+  relocation exercised from `safetynet::asm!`.
 - **Phase 5 — `#[derive(VmLayout)]` + unit enums.** Automate Phase 4; derive must
   match the hand impl byte-for-byte, in both orders.
 - **Phase 6 — Lowerer + `#[safetynet]`.** ⭐ *First end-to-end.* Subset checker,
@@ -929,7 +929,7 @@ Each phase ends runnable and tested; the two harnesses grow continuously.
   own oracles. Done when the `Packet` flag-check runs on the VM and matches its
   reference on random + edge inputs.
 - **Phase 7 — Subset extensions.** Data enums, `match`, `Result`/`?`, host table.
-- **Phase 8 — Ship hardening.** ⭐ *Shippable.* Confirm assembler and `sn_asm!` are
+- **Phase 8 — Ship hardening.** ⭐ *Shippable.* Confirm assembler and `safetynet::asm!` are
   proc-macro-side, minimize/DCE the linker, CI verification on the stripped binary.
 - **Phase 9 — Mutation (deferred, off critical path).**
 
@@ -1084,7 +1084,7 @@ harness.
 
 ## R10 — The lowerer emits a `Cfg`, not asm text; the textual handoff was considered and rejected *(recorded decision)*
 
-The tempting move is to have `#[safetynet]` lower the Rust subset to `sn_asm!`
+The tempting move is to have `#[safetynet]` lower the Rust subset to `safetynet::asm!`
 tokens and let rustc expand that — one path to bytecode, parity by construction.
 It was specified that way briefly and then reverted, because the argument does
 not survive inspection:
@@ -1145,7 +1145,7 @@ loudly.
 - **No encode/decode round-trip test** *(addressed)*. The throwaway hand-assembler
   is deleted after Phase 1, which originally left no property that
   `decode(encode(x)) == x`; a symmetric encoder/decoder bug would pass the
-  behavioral diff yet corrupt any future tooling. Phase 3's `sn_asm!` plus its
+  behavioral diff yet corrupt any future tooling. Phase 3's `safetynet::asm!` plus its
   disassembler replace it permanently, and the fixed-point round-trip is that
   phase's exit criterion.
 - **Three overlapping representations for array-like data** — a `[u8; N]` const
