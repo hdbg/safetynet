@@ -192,6 +192,7 @@ name = "safetynet"
 version = "0.1.0"
 dependencies = [
  "safetynet-core",
+ "safetynet-macros",
 ]
 
 [[package]]
@@ -212,6 +213,12 @@ dependencies = [
 [[package]]
 name = "safetynet-macros"
 version = "0.1.0"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "safetynet-core",
+ "syn 3.0.5",
+]
 
 [[package]]
 name = "scoped-tls"
