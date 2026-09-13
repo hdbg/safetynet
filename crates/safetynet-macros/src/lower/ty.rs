@@ -19,6 +19,12 @@ impl Scalar {
         signed: false,
     };
 
+    /// The type an integer literal takes with nothing else to go on.
+    pub(crate) const I32: Self = Self {
+        width: Width::U32,
+        signed: true,
+    };
+
     /// The scalar a type name denotes, if the machine can hold it.
     ///
     /// There is no two-byte access, so `u16`/`i16` are declined rather than

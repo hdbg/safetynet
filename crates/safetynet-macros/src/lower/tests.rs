@@ -88,3 +88,30 @@ fn a_let_without_a_type_is_refused() {
 fn an_unsupported_expression_is_refused() {
     assert!(refusal("fn f(x: u32) -> u32 { g(x) }").contains("supported"));
 }
+
+#[test]
+fn a_conditional_round_trips() {
+    assert_round_trips(&graph(
+        "fn max(a: u32, b: u32) -> u32 { if a < b { b } else { a } }",
+    ));
+}
+
+#[test]
+fn an_early_return_round_trips() {
+    assert_round_trips(&graph("fn f(x: u32) -> u32 { if x < 10 { return 0; } x }"));
+}
+
+#[test]
+fn an_else_if_chain_round_trips() {
+    assert_round_trips(&graph(
+        "fn sign(x: i64) -> i64 { if x < 0 { -1 } else if x > 0 { 1 } else { 0 } }",
+    ));
+}
+
+#[test]
+fn a_let_inside_a_branch_is_refused() {
+    assert!(
+        refusal("fn f(c: bool) -> u32 { if c { let y: u32 = 1; y } else { 0 } }")
+            .contains("branch")
+    );
+}
