@@ -173,6 +173,10 @@ security argument.
 - Control: `JMP`, `JZ`, `JNZ` (relative offsets), `SWITCH` (jump table)
 - `HOST k` (host escape, §7.4), `HALT`
 
+`LEA` is specified but not yet implemented (§5): it is the only way to take the
+address of a frame local, which arrays, slices and `&local` all need. It will be
+appended to the table rather than inserted, so that existing opcode numbers hold.
+
 `SWITCH` and `HOST` have **reserved opcodes that trap on execution** until the
 subset needs them — `match` lowering and the host table respectively. Reserving
 the bytes now keeps opcode numbering stable across the phases that add them.
@@ -349,6 +353,48 @@ from the shadow type, frame size rounded to 8. Cells are never reused across
 locals for now; overlapping the cells of locals with disjoint lifetimes is a
 later optimization that the symbolic `Local(cell)` form leaves open.
 Out-of-subset constructs are rejected with `syn::Error::new_spanned`.
+
+**Arrays in the frame — deferred, with its shape recorded.** A `[u8; 32]` local
+is not a cell: a cell's width is both the bytes it owns and the width every
+access to it uses, and an array separates those two. The frame is byte-granular
+already, so the storage is not the problem; the declaration is. When arrays land,
+three things change together:
+
+```rust
+struct Cell { off: u16, size: u16, align: u16 }   // what it owns, how it is placed
+frame.add_array(elem: Width, count: u16) -> CellId
+Item::Load { cell, offset, width }                // access width moves to the use
+```
+
+A scalar becomes the degenerate case — `offset: 0`, `width` the cell's own — and
+a constant index folds into `offset`, so `buf[3]` is still one `LDS8` at
+`k = F − (base + 3) + d`.
+
+A *dynamic* index is a different matter, and it exposes a real gap: `LDS` takes
+its displacement as an immediate, so a computed index cannot go in one, and the
+fallback of computing an absolute address needs `SP`, which no instruction
+produces. **There is currently no way to take the address of a frame local**, and
+§5's own `Slice { ptr, len }` already depends on being able to: the `ptr` cell is
+specified to hold an absolute address, and for a frame-resident array nothing can
+compute one. The fix is one opcode using the displacement machinery that already
+exists:
+
+```
+LEA k      push SP − k        sp_delta = +8
+```
+
+Then `&local` is `lea (F − c + d)`, `buf[i]` is `lea base; push i; add; ld8`, and
+a slice literal is an `lea` beside a `push` of the length — all materialized by
+the same pass, from the same `k`, as `LDS`. Handing `SP` to the guest costs
+nothing: `LD`/`ST` already reach every byte and the stack holds no return
+addresses, which §3.3 relies on for other reasons anyway. A dynamic index derived
+from `.input` still needs a bounds check emitted against a compile-time length —
+`LEA` makes the access expressible, not safe.
+
+Two ordering constraints. `LEA` must be **appended** to the opcode table rather
+than inserted, since a tag is a variant's position and inserting one renumbers
+every instruction after it. And the `Item` change is cheap now and expensive
+later, because every pass written against `Load(cell)` has to be revisited.
 
 ---
 
