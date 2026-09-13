@@ -43,6 +43,7 @@ impl<B: ByteOrder> Vm<B> {
     /// assert_eq!(vm.pop()?, 42);
     /// # Ok::<_, Box<dyn std::error::Error>>(())
     /// ```
+    #[inline(always)]
     pub fn run(self, program: &Program<B>, fuel: u64) -> Result<Self, Trap> {
         self.run_with(program, &Packed::<B>::new(), fuel)
     }
@@ -54,6 +55,7 @@ impl<B: ByteOrder> Vm<B> {
     /// whatever encoder laid the program out: this loop trusts the length it
     /// reports to find the next instruction, and a relative branch is measured
     /// against that same boundary.
+    #[inline(always)]
     pub fn run_with<D: Decoder<Order = B>>(
         mut self,
         program: &Program<B>,
@@ -85,6 +87,7 @@ impl<B: ByteOrder> Vm<B> {
     /// The delta is measured from `next`, the first byte of the instruction that
     /// follows the branch, which is what keeps a fixed-width offset from
     /// depending on how long the branch itself encoded to.
+    #[inline(always)]
     fn target(code: &[u8], branch: usize, next: usize, delta: i32) -> Result<usize, Trap> {
         let bad = || Trap::BadJump {
             from: branch,
@@ -108,6 +111,7 @@ impl<B: ByteOrder> Vm<B> {
 }
 
 /// Decodes the instruction at `pc`.
+#[inline(always)]
 fn fetch<D: Decoder>(code: &[u8], pc: usize, decoder: &D) -> Result<(Instr, usize), Trap> {
     let rest = code.get(pc..).ok_or(Trap::CodeOutOfRange { offset: pc })?;
 
