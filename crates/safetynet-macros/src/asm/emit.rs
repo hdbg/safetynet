@@ -62,7 +62,9 @@ pub(crate) fn emit(order: &Path, lowered: &Lowered) -> syn::Result<TokenStream> 
     for reloc in resolved.relocs() {
         let at = byte_at(reloc.index);
         let region = region_tokens(reloc.region);
-        relocs.push(quote!(::safetynet::Reloc::region_base::<#order>(#at, #region)));
+        relocs.push(quote! {
+            ::safetynet::Reloc::region_base::<::safetynet::encoding::Packed<#order>>(#at, #region)
+        });
     }
 
     let mut patches = Vec::new();

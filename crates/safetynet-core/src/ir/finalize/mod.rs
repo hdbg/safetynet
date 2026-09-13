@@ -26,7 +26,7 @@ use core::marker::PhantomData;
 use std::borrow::Cow;
 
 use super::{Block, BlockId, Cfg, Item, Terminator, Where, validate};
-use crate::encoding::{Encoder, Packed, encode, encoded_len};
+use crate::encoding::{Encoder, Packed, encoded_len};
 use crate::ir::{Frame, Invalid};
 use crate::isa::{Alloc, Instr, Jmp, Jnz, Jz, Lds8, Lds32, Lds64, Push32, Sts8, Sts32, Sts64};
 use crate::{ByteOrder, FrameSize, Layout, Program, Region, Width};
@@ -311,19 +311,21 @@ impl Reloc {
         }
     }
 
-    /// The standard region-base relocation: re-encode `Push32 { imm: base }` in
-    /// order `B`, where `base` is where `region` ends up in the layout.
+    /// The standard region-base relocation: re-encode the region's base as a
+    /// `Push32` with the encoder `E`, where the base is where `region` ends up in
+    /// the layout.
     ///
-    /// Self-contained on purpose — it carries the packed codec for `B` rather
-    /// than a borrowed encoder — because this is what a macro expansion emits and
-    /// there is nothing at that point to hand it.
-    pub fn region_base<B: ByteOrder>(at: usize, region: Region) -> Self {
+    /// Generic over the encoder rather than tied to one wire format. The encoder
+    /// carries its own byte order, and a macro expansion hands it the packed one
+    /// — the only format a shipped program decodes.
+    pub fn region_base<E: Encoder + Default + 'static>(at: usize, region: Region) -> Self {
+        let encoder = E::default();
         // Measure the slot from the push it holds rather than assuming a width.
-        let len = encoded_len(Push32 { imm: 0 }.into()).unwrap_or_default();
+        let len = encoder
+            .encoded_len(Push32 { imm: 0 }.into())
+            .unwrap_or_default();
         Self::new(at, len, move |layout, slice| {
-            let mut tmp = Vec::new();
-            encode::<B>(base_push(region, layout), &mut tmp).map_err(NotFinal::encode)?;
-            copy_reencoded(&tmp, slice)
+            reencode_base(&encoder, region, layout, slice)
         })
     }
 }
