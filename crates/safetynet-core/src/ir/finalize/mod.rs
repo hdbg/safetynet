@@ -34,10 +34,6 @@ use crate::{ByteOrder, FrameSize, Layout, Program, Region, Width};
 #[cfg(test)]
 mod tests;
 
-/// A region base or field offset both fit a narrow push: one tag byte, four for
-/// the `u32`.
-const PUSH32_LEN: usize = 5;
-
 /// Lowers a validated graph to bytecode in the standard encoding.
 pub fn finalize<B: ByteOrder>(cfg: &Cfg, layout: &Layout) -> Result<Program<B>, NotFinal> {
     assemble::<B>(cfg)?.finalize(layout)
@@ -322,7 +318,9 @@ impl Reloc {
     /// than a borrowed encoder — because this is what a macro expansion emits and
     /// there is nothing at that point to hand it.
     pub fn region_base<B: ByteOrder>(at: usize, region: Region) -> Self {
-        Self::new(at, PUSH32_LEN, move |layout, slice| {
+        // Measure the slot from the push it holds rather than assuming a width.
+        let len = encoded_len(Push32 { imm: 0 }.into()).unwrap_or_default();
+        Self::new(at, len, move |layout, slice| {
             let mut tmp = Vec::new();
             encode::<B>(base_push(region, layout), &mut tmp).map_err(NotFinal::encode)?;
             copy_reencoded(&tmp, slice)
