@@ -21,5 +21,8 @@
 
 pub use safetynet_core::*;
 
+/// Assembles a program at compile time.
+pub use safetynet_macros::asm;
+
 /// The byte order used when a site does not name one.
 pub type Order = Le;

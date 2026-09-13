@@ -9,6 +9,7 @@ repository.workspace = true
 
 [dependencies]
 safetynet-core.workspace = true
+safetynet-macros.workspace = true
 
 [lints]
 workspace = true
