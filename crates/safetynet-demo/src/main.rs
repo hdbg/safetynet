@@ -19,9 +19,7 @@ use std::fmt::Write as _;
 use safetynet::asm::print_listing;
 use safetynet::encoding::decode;
 use safetynet::image::{Image, Layout, Region, Sizes};
-use safetynet::{
-    Artifact, ByteOrder, Field, Le, Order, Program, TypeLayout, Vm, VmLayout, WORD_SIZE, Word,
-};
+use safetynet::{Artifact, ByteOrder, Le, Order, Program, Vm, VmLayout, WORD_SIZE, Word};
 
 /// Room for the frame, plus the few words the loop keeps live.
 const STACK: u32 = 256;
@@ -48,44 +46,12 @@ const SCRATCH: u32 = (Config::SIZE + 2 * WORD_SIZE) as u32;
 
 /// The host's typed input: the keystream seed and the message length, marshalled
 /// into the front of `.scratch`.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, VmLayout)]
 struct Config {
     /// The keystream seed.
     seed: Word,
     /// How many bytes of `.input` the host wrote.
     len: u32,
-}
-
-impl VmLayout for Config {
-    const LAYOUT: &'static TypeLayout = &TypeLayout::new(&[
-        Field::new("seed", 0, 8, None),
-        Field::new("len", 8, 4, None),
-    ]);
-    const SIZE: usize = 16;
-    const ALIGN: usize = 8;
-
-    fn marshal<B: ByteOrder>(&self, mem: &mut [u8]) {
-        if let Some(slot) = mem.get_mut(0..8) {
-            slot.copy_from_slice(&B::write_u64(self.seed));
-        }
-        if let Some(slot) = mem.get_mut(8..12) {
-            slot.copy_from_slice(&B::write_u32(self.len));
-        }
-    }
-
-    fn unmarshal<B: ByteOrder>(mem: &[u8]) -> Self {
-        let seed = mem
-            .get(0..8)
-            .and_then(|b| b.try_into().ok())
-            .map(B::read_u64)
-            .unwrap_or_default();
-        let len = mem
-            .get(8..12)
-            .and_then(|b| b.try_into().ok())
-            .map(B::read_u32)
-            .unwrap_or_default();
-        Self { seed, len }
-    }
 }
 
 /// The cipher: XOR every byte of `.input` with a keystream byte derived from

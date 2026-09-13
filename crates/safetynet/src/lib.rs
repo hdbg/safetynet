@@ -24,5 +24,8 @@ pub use safetynet_core::*;
 /// Assembles a program at compile time.
 pub use safetynet_macros::asm;
 
+/// Derives [`VmLayout`] for a struct.
+pub use safetynet_macros::VmLayout;
+
 /// The byte order used when a site does not name one.
 pub type Order = Le;

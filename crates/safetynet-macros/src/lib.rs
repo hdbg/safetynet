@@ -1,8 +1,19 @@
 //! Proc-macros for safetynet.
 
 mod asm;
+mod derive;
 
 use proc_macro::TokenStream;
+
+/// Derives [`VmLayout`] for a struct: its canonical flat layout, `SIZE`,
+/// `ALIGN`, and `marshal`/`unmarshal`, computed from the fields' own layouts.
+#[proc_macro_derive(VmLayout)]
+pub fn derive_vm_layout(input: TokenStream) -> TokenStream {
+    match syn::parse(input).and_then(derive::vm_layout) {
+        Ok(expansion) => expansion.into(),
+        Err(error) => error.to_compile_error().into(),
+    }
+}
 
 /// Assembles a program at compile time.
 ///
@@ -21,21 +32,21 @@ use proc_macro::TokenStream;
 /// safetynet::asm!(Le {
 ///     .frame { cursor: u64, sum: u64 }
 /// head:
-///     push .input
-///     store cursor
+///     $push .input
+///     $store cursor
 /// loop:
-///     load cursor
-///     load sum
+///     $load cursor
+///     $load sum
 ///     eq
 ///     jnz done            // the other arm falls through
 /// body:
-///     load cursor
+///     $load cursor
 ///     push8 1
 ///     add
-///     store cursor
+///     $store cursor
 ///     jmp loop
 /// done:
-///     load sum
+///     $load sum
 ///     halt
 /// })
 /// ```
