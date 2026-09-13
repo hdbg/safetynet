@@ -4,8 +4,8 @@
 #![allow(clippy::expect_used)]
 
 use safetynet::encoding::decode;
-use safetynet::image::{Layout, Sizes};
-use safetynet::{Be, ByteOrder, Field, Instr, Le, TypeLayout, VmLayout};
+use safetynet::image::{Image, Layout, Region, Sizes};
+use safetynet::{Be, ByteOrder, Field, Instr, Le, TypeLayout, Vm, VmLayout};
 
 /// `seq: u32 @ 0`, `flags: u8 @ 4`; align 4, `SIZE` 8.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -146,4 +146,59 @@ fn the_offset_is_order_independent() {
         other => panic!("got {other:?}"),
     };
     assert_eq!(le, be);
+}
+
+/// Marshal a packet into `.input`, then read one of its fields back through the
+/// VM: `marshal`'s layout and the linker's offsets have to agree, or the wrong
+/// bytes come out.
+fn reads_back_seq<B: ByteOrder>(program: safetynet::Artifact<B>) -> u32 {
+    let packet = Packet {
+        kind: 0x11,
+        header: Header {
+            seq: 0xcafe_1234,
+            flags: 0x7,
+        },
+        tag: 0x9988_7766_5544_3322,
+    };
+
+    let layout = Layout::new(Sizes {
+        input: Packet::SIZE as u32,
+        stack: 256,
+        ..Sizes::default()
+    })
+    .expect("fits");
+    let program = program.finalize(&layout).expect("finalizes");
+
+    let mut image = Image::new(layout);
+    let mut buf = [0u8; Packet::SIZE];
+    packet.marshal::<B>(&mut buf);
+    image.write(Region::Input, &buf).expect("room");
+
+    let mut vm = Vm::<B>::new(image)
+        .run(&program, 10_000)
+        .expect("terminates");
+    u32::try_from(vm.pop().expect("a result")).expect("fits u32")
+}
+
+macro_rules! read_seq {
+    ($order:ident) => {
+        safetynet::asm!($order {
+        entry:
+            push .input                 // base of the marshalled packet
+            field Packet::header.seq    // its offset within the packet
+            add                         // the field's absolute address
+            ld32
+            halt
+        })
+    };
+}
+
+#[test]
+fn a_field_reads_back_through_the_vm_le() {
+    assert_eq!(reads_back_seq(read_seq!(Le)), 0xcafe_1234);
+}
+
+#[test]
+fn a_field_reads_back_through_the_vm_be() {
+    assert_eq!(reads_back_seq(read_seq!(Be)), 0xcafe_1234);
 }
