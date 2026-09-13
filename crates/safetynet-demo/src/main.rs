@@ -19,7 +19,7 @@ use std::fmt::Write as _;
 use safetynet::asm::print_listing;
 use safetynet::encoding::decode;
 use safetynet::image::{Image, Layout, Region, Sizes};
-use safetynet::{Artifact, ByteOrder, Le, Order, Program, Vm, VmLayout, WORD_SIZE, Word};
+use safetynet::{Artifact, ByteOrder, Le, Order, Program, Vm, VmLayout, VmValue, WORD_SIZE, Word};
 
 /// Room for the frame, plus the few words the loop keeps live.
 const STACK: u32 = 256;
@@ -44,14 +44,27 @@ const TAG_AT: usize = Config::SIZE;
 /// `.scratch`: the `Config`, then a tag and half a tag.
 const SCRATCH: u32 = (Config::SIZE + 2 * WORD_SIZE) as u32;
 
-/// The host's typed input: the keystream seed and the message length, marshalled
-/// into the front of `.scratch`.
+/// Whether the program ciphers its input or leaves it alone. The host marshals
+/// the choice as a discriminant; the program reads it back and switches on it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, VmValue)]
+#[repr(u8)]
+enum Mode {
+    /// Apply the keystream.
+    Cipher,
+    /// Skip the cipher and leave `.input` untouched.
+    Passthrough,
+}
+
+/// The host's typed input: the keystream seed, the message length, and the mode,
+/// marshalled into the front of `.scratch`.
 #[derive(Debug, Clone, Copy, VmLayout)]
 struct Config {
     /// The keystream seed.
     seed: Word,
     /// How many bytes of `.input` the host wrote.
     len: u32,
+    /// The [`Mode`] discriminant the program switches on.
+    mode: u8,
 }
 
 /// The cipher: XOR every byte of `.input` with a keystream byte derived from
@@ -88,6 +101,13 @@ macro_rules! cipher_program {
         $store count
         push8 0
         $store last                   // every cell is written before it is read
+        $push .scratch                // the mode the host chose
+        $field Config::mode
+        add
+        ld8
+        $tag Mode::Passthrough
+        eq
+        jnz passthrough               // skip the cipher when the mode says so
     head:
         $load cursor
         $load end
@@ -224,6 +244,9 @@ macro_rules! cipher_program {
     bad:
         push8 0                      // the counter disagreed with the cursor
         halt
+    passthrough:
+        push8 0                      // the mode said leave the input alone
+        halt
         })
     };
 }
@@ -260,8 +283,9 @@ fn cipher<B: ByteOrder>(
     program: &Program<B>,
     layout: Layout,
     input: &[u8],
+    mode: Mode,
 ) -> Result<Run, Box<dyn Error>> {
-    run::<B>(program, layout, input, FUEL)
+    run::<B>(program, layout, input, FUEL, mode)
 }
 
 /// Runs the cipher over `input`, reading back everything it left behind.
@@ -270,6 +294,7 @@ fn run<B: ByteOrder>(
     layout: Layout,
     input: &[u8],
     fuel: u64,
+    mode: Mode,
 ) -> Result<Run, Box<dyn Error>> {
     let mut image = Image::new(layout);
     image
@@ -280,6 +305,7 @@ fn run<B: ByteOrder>(
     let config = Config {
         seed: SEED,
         len: u32::try_from(input.len())?,
+        mode: mode.to_word() as u8,
     };
     let mut scratch = [0u8; Config::SIZE];
     config.marshal::<B>(&mut scratch);
@@ -358,7 +384,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         String::from_utf8_lossy(plaintext)
     );
 
-    let encrypted = cipher::<Order>(&program, layout, plaintext)?;
+    let encrypted = cipher::<Order>(&program, layout, plaintext, Mode::Cipher)?;
     println!(
         "ciphertext  {}  tag {:#018x}",
         hex(&encrypted.output),
@@ -366,7 +392,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     );
     println!("result      {:#018x}", encrypted.result);
 
-    let decrypted = cipher::<Order>(&program, layout, &encrypted.output)?;
+    let decrypted = cipher::<Order>(&program, layout, &encrypted.output, Mode::Cipher)?;
     println!(
         "decrypted   {}  {}",
         hex(&decrypted.output),
@@ -403,6 +429,7 @@ mod tests {
         let config = Config {
             seed: SEED,
             len: 0x1234_5678,
+            mode: Mode::Passthrough.to_word() as u8,
         };
         let mut mem = [0u8; Config::SIZE];
         config.marshal::<B>(&mut mem);
@@ -420,6 +447,26 @@ mod tests {
     #[test]
     fn config_round_trips_be() {
         config_round_trips::<Be>();
+    }
+
+    /// The mode discriminant round-trips through the derive.
+    #[test]
+    fn mode_round_trips() {
+        for mode in [Mode::Cipher, Mode::Passthrough] {
+            assert_eq!(Mode::from_word(mode.to_word()), mode);
+        }
+    }
+
+    /// Passthrough mode branches past the cipher on the discriminant the host
+    /// marshalled, leaving `.input` exactly as it was.
+    #[test]
+    fn passthrough_mode_leaves_the_input_alone() {
+        let plaintext: &[u8] = b"attack at dawn";
+        let (program, layout) = build(&program_le(), plaintext.len());
+
+        let run = run::<Order>(&program, layout, plaintext, FUEL, Mode::Passthrough).expect("runs");
+        assert_eq!(run.output, plaintext, "the input is untouched");
+        assert_eq!(run.result, 0, "and the passthrough result is zero");
     }
 
     /// Finalizes an artifact for a message of `len` bytes.
@@ -476,10 +523,11 @@ mod tests {
         let plaintext: &[u8] = b"attack at dawn";
         let (program, layout) = build(artifact, plaintext.len());
 
-        let encrypted = cipher::<B>(&program, layout, plaintext).expect("encrypts");
+        let encrypted = cipher::<B>(&program, layout, plaintext, Mode::Cipher).expect("encrypts");
         assert_ne!(encrypted.output, plaintext, "the keystream did nothing");
 
-        let decrypted = cipher::<B>(&program, layout, &encrypted.output).expect("decrypts");
+        let decrypted =
+            cipher::<B>(&program, layout, &encrypted.output, Mode::Cipher).expect("decrypts");
         assert_eq!(decrypted.output, plaintext);
     }
 
@@ -500,7 +548,7 @@ mod tests {
         let plaintext: &[u8] = b"attack at dawn";
         let (program, layout) = build(&program_le(), plaintext.len());
 
-        let run = cipher::<Order>(&program, layout, plaintext).expect("encrypts");
+        let run = cipher::<Order>(&program, layout, plaintext, Mode::Cipher).expect("encrypts");
         let expected = model(plaintext, &layout);
 
         assert_eq!(run.output, expected.output, "the keystream");
@@ -518,10 +566,10 @@ mod tests {
         let (big, _) = build(&program_be(), plaintext.len());
 
         assert_eq!(
-            cipher::<Le>(&little, layout, plaintext)
+            cipher::<Le>(&little, layout, plaintext, Mode::Cipher)
                 .expect("little-endian")
                 .output,
-            cipher::<Be>(&big, layout, plaintext)
+            cipher::<Be>(&big, layout, plaintext, Mode::Cipher)
                 .expect("big-endian")
                 .output,
         );
@@ -573,7 +621,8 @@ mod tests {
         let plaintext: &[u8] = b"attack at dawn";
         let (program, layout) = build(&program_le(), plaintext.len());
 
-        let error = run::<Order>(&program, layout, plaintext, 8).expect_err("runs out");
+        let error =
+            run::<Order>(&program, layout, plaintext, 8, Mode::Cipher).expect_err("runs out");
 
         assert_eq!(error.downcast_ref::<Trap>(), Some(&Trap::OutOfFuel));
     }
