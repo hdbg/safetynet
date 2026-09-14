@@ -109,9 +109,32 @@ fn an_else_if_chain_round_trips() {
 }
 
 #[test]
-fn a_let_inside_a_branch_is_refused() {
-    assert!(
-        refusal("fn f(c: bool) -> u32 { if c { let y: u32 = 1; y } else { 0 } }")
-            .contains("branch")
-    );
+fn a_let_inside_a_branch_round_trips() {
+    assert_round_trips(&graph(
+        "fn f(c: bool) -> u32 { if c { let y: u32 = 1; y } else { 0 } }",
+    ));
+}
+
+#[test]
+fn a_while_loop_round_trips() {
+    assert_round_trips(&graph(
+        "fn f(n: u32) -> u32 { let mut s: u32 = 0; let mut i: u32 = 0; while i < n { s = s + i; i = i + 1; } s }",
+    ));
+}
+
+#[test]
+fn a_loop_with_break_round_trips() {
+    assert_round_trips(&graph(
+        "fn f(n: u32) -> u32 { let mut i: u32 = 0; loop { if i >= n { break; } i += 1; } i }",
+    ));
+}
+
+#[test]
+fn a_break_outside_a_loop_is_refused() {
+    assert!(refusal("fn f() -> u32 { break; }").contains("loop"));
+}
+
+#[test]
+fn assigning_a_parameter_is_refused() {
+    assert!(refusal("fn f(x: u32) -> u32 { x = 1; x }").contains("parameter"));
 }

@@ -1,6 +1,11 @@
 //! `#[safetynet]` functions run on the VM and agree with the plain Rust they
 //! were written as.
 
+// The fixtures write out `s = s + i` and `i % 3 == 0` on purpose, to exercise
+// plain assignment and remainder — the tidier idioms clippy suggests are either
+// what a separate test already covers or something the subset cannot lower.
+#![allow(clippy::assign_op_pattern, clippy::manual_is_multiple_of)]
+
 use safetynet::safetynet;
 
 #[safetynet]
@@ -161,4 +166,78 @@ fn a_unary_negation_runs() {
 fn a_branch_on_a_bool_returns_early() {
     assert_eq!(pick(true, 1, 2), 1);
     assert_eq!(pick(false, 1, 2), 2);
+}
+
+#[safetynet]
+fn triangular(n: u32) -> u32 {
+    let mut s: u32 = 0;
+    let mut i: u32 = 0;
+    while i < n {
+        s = s + i;
+        i = i + 1;
+    }
+    s
+}
+
+#[safetynet]
+fn power_of_two(n: u32) -> u64 {
+    let mut r: u64 = 1;
+    let mut i: u32 = 0;
+    while i < n {
+        r = r * 2;
+        i += 1;
+    }
+    r
+}
+
+#[safetynet]
+fn count_up(limit: u32) -> u32 {
+    let mut i: u32 = 0;
+    loop {
+        if i >= limit {
+            break;
+        }
+        i += 1;
+    }
+    i
+}
+
+#[safetynet]
+fn sum_skipping_threes(n: u32) -> u32 {
+    let mut s: u32 = 0;
+    let mut i: u32 = 0;
+    while i < n {
+        i += 1;
+        if i % 3 == 0 {
+            continue;
+        }
+        s += i;
+    }
+    s
+}
+
+#[test]
+fn a_while_loop_accumulates() {
+    assert_eq!(triangular(0), 0);
+    assert_eq!(triangular(1), 0);
+    assert_eq!(triangular(5), 10);
+    assert_eq!(triangular(10), 45);
+}
+
+#[test]
+fn a_loop_multiplies_across_iterations() {
+    assert_eq!(power_of_two(0), 1);
+    assert_eq!(power_of_two(10), 1024);
+}
+
+#[test]
+fn a_loop_breaks() {
+    assert_eq!(count_up(0), 0);
+    assert_eq!(count_up(7), 7);
+}
+
+#[test]
+fn a_loop_continues() {
+    // 1..=6 without the multiples of three: 1+2+4+5 = 12.
+    assert_eq!(sum_skipping_threes(6), 12);
 }

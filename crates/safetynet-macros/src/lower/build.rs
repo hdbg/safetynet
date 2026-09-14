@@ -5,18 +5,19 @@
 //! is left on the stack, which the caller reads once the machine halts.
 //!
 //! Structured control flow becomes blocks and edges. Each construct is lowered
-//! into a fresh block, and the lowerer tracks whether a path *falls through* to
-//! the next block or *diverges* by returning — so a branch whose arms both
-//! return leaves no join behind, which the reachability check would reject.
+//! into fresh blocks, and the lowerer tracks whether a path *falls through* to
+//! the next block or *diverges* — by returning, breaking or continuing — so a
+//! branch or loop that never falls through leaves no unreachable block behind,
+//! which the graph check would reject.
 
 use std::collections::HashMap;
 
 use proc_macro2::Span;
 use quote::ToTokens;
-use safetynet_core::ir::{BlockId, Cfg, Frame, Terminator};
+use safetynet_core::ir::{BlockId, Builder, CellId, Cfg, Frame, Terminator};
 use safetynet_core::isa::{
-    Add, And, CmpEq, CmpLe, CmpLt, CmpSLe, CmpSLt, Div, Ld8, Ld32, Ld64, Mul, Or, Push8, Push32,
-    Push64, Rem, SDiv, SRem, Sar, Shl, Shr, Sub, Xor,
+    Add, And, BitNot, CmpEq, CmpLe, CmpLt, CmpSLe, CmpSLt, Div, Ld8, Ld32, Ld64, Mul, Or, Push8,
+    Push32, Push64, Rem, SDiv, SRem, Sar, Shl, Shr, Sub, Xor,
 };
 use safetynet_core::{Instr, Region, Width};
 
@@ -45,10 +46,15 @@ enum Binding {
     /// A parameter, at a byte offset in `.input`.
     Param { offset: u32, ty: Scalar },
     /// A local, in a frame cell.
-    Local {
-        cell: safetynet_core::ir::CellId,
-        ty: Scalar,
-    },
+    Local { cell: CellId, ty: Scalar },
+}
+
+/// The blocks a `break` and a `continue` jump to for the enclosing loop.
+struct Loop {
+    /// Where `continue` goes: a `while`'s head, a `loop`'s body.
+    continue_to: BlockId,
+    /// Where `break` goes, created on the first one a `loop` needs.
+    break_to: Option<BlockId>,
 }
 
 /// Whether a statement path continues or has already left the block.
@@ -57,7 +63,7 @@ enum Flow {
     /// Execution reaches the end of the current block; it still needs a
     /// terminator.
     Open,
-    /// The path returned; the current block is already sealed.
+    /// The path left the block, which is already sealed.
     Diverged,
 }
 
@@ -65,8 +71,29 @@ enum Flow {
 enum Value {
     /// A value of this type is on top of the stack.
     Produced(Scalar),
-    /// Every path returned; there is no value and no fall-through.
+    /// Every path left; there is no value and no fall-through.
     Diverged,
+}
+
+/// The plain binary operators, once assignment and mirroring are stripped off.
+#[derive(Clone, Copy)]
+enum Op {
+    Add,
+    Sub,
+    Mul,
+    Div,
+    Rem,
+    And,
+    Or,
+    Xor,
+    Shl,
+    Shr,
+    Eq,
+    Ne,
+    /// Less-than, after any operand swap for `>`.
+    Lt,
+    /// Less-or-equal, after any operand swap for `>=`.
+    Le,
 }
 
 /// Lowers one function to its graph.
@@ -99,19 +126,11 @@ pub(crate) fn lower(func: &syn::ItemFn) -> syn::Result<Lowered> {
     let input_size = offset;
     bindings.push(ret_ty.clone());
 
-    // One cell per top-level local, before anything is lowered.
+    // One cell per local, wherever it is declared, in the order lowering reaches
+    // them. Locals live in statement blocks; value blocks hold none.
     let mut frame = Frame::new();
     let mut cells = Vec::new();
-    for stmt in &func.block.stmts {
-        if let syn::Stmt::Local(local) = stmt {
-            let (_, scalar, ty_node) = declared_local(local)?;
-            let cell = frame
-                .add(scalar.width)
-                .ok_or_else(|| err(&local.pat, "the frame is too large"))?;
-            cells.push(cell);
-            bindings.push(ty_node);
-        }
-    }
+    collect_cells(&func.block, &mut frame, &mut cells, &mut bindings)?;
 
     let mut builder = Cfg::builder(frame);
     let entry = builder.block(0);
@@ -119,6 +138,7 @@ pub(crate) fn lower(func: &syn::ItemFn) -> syn::Result<Lowered> {
         builder,
         scope,
         cells: cells.into_iter(),
+        loops: Vec::new(),
         cur: entry,
         ret,
     };
@@ -137,11 +157,68 @@ pub(crate) fn lower(func: &syn::ItemFn) -> syn::Result<Lowered> {
     })
 }
 
+/// Allocates a cell for every local, recursing into the statement blocks
+/// lowering will reach in the same order.
+fn collect_cells(
+    block: &syn::Block,
+    frame: &mut Frame,
+    cells: &mut Vec<CellId>,
+    bindings: &mut Vec<syn::Type>,
+) -> syn::Result<()> {
+    for stmt in &block.stmts {
+        match stmt {
+            syn::Stmt::Local(local) => {
+                let (_, scalar, ty_node) = declared_local(local)?;
+                let cell = frame
+                    .add(scalar.width)
+                    .ok_or_else(|| err(&local.pat, "the frame is too large"))?;
+                cells.push(cell);
+                bindings.push(ty_node);
+            }
+            syn::Stmt::Expr(syn::Expr::If(if_expr), _) => {
+                collect_cells(&if_expr.then_branch, frame, cells, bindings)?;
+                if let Some((_, else_expr)) = &if_expr.else_branch {
+                    collect_else_cells(else_expr, frame, cells, bindings)?;
+                }
+            }
+            syn::Stmt::Expr(syn::Expr::While(while_expr), _) => {
+                collect_cells(&while_expr.body, frame, cells, bindings)?;
+            }
+            syn::Stmt::Expr(syn::Expr::Loop(loop_expr), _) => {
+                collect_cells(&loop_expr.body, frame, cells, bindings)?;
+            }
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
+/// Cell collection for the `else` of an `if`: a block, or an `else if`.
+fn collect_else_cells(
+    else_expr: &syn::Expr,
+    frame: &mut Frame,
+    cells: &mut Vec<CellId>,
+    bindings: &mut Vec<syn::Type>,
+) -> syn::Result<()> {
+    match else_expr {
+        syn::Expr::Block(block) => collect_cells(&block.block, frame, cells, bindings),
+        syn::Expr::If(if_expr) => {
+            collect_cells(&if_expr.then_branch, frame, cells, bindings)?;
+            if let Some((_, inner)) = &if_expr.else_branch {
+                collect_else_cells(inner, frame, cells, bindings)?;
+            }
+            Ok(())
+        }
+        _ => Ok(()),
+    }
+}
+
 /// The state threaded through lowering a body.
 struct Lowerer {
-    builder: safetynet_core::ir::Builder,
+    builder: Builder,
     scope: HashMap<String, Binding>,
-    cells: std::vec::IntoIter<safetynet_core::ir::CellId>,
+    cells: std::vec::IntoIter<CellId>,
+    loops: Vec<Loop>,
     /// The block instructions are being appended to.
     cur: BlockId,
     ret: Scalar,
@@ -154,42 +231,85 @@ impl Lowerer {
         let stmts = &block.stmts;
         for (index, stmt) in stmts.iter().enumerate() {
             let last = index + 1 == stmts.len();
-            let flow = match stmt {
-                syn::Stmt::Local(local) => {
-                    self.lower_let(local)?;
-                    Flow::Open
-                }
-                syn::Stmt::Expr(syn::Expr::Return(ret), _) => {
-                    self.lower_return(ret)?;
-                    Flow::Diverged
-                }
-                syn::Stmt::Expr(syn::Expr::If(if_expr), semi) if last && semi.is_none() => {
-                    match self.lower_if_value(if_expr, self.ret)? {
-                        Value::Produced(_) => {
-                            self.seal(self.cur, Terminator::Halt)?;
-                            Flow::Diverged
-                        }
-                        Value::Diverged => Flow::Diverged,
-                    }
-                }
-                syn::Stmt::Expr(syn::Expr::If(if_expr), _) => self.lower_if_stmt(if_expr)?,
-                syn::Stmt::Expr(expr, None) if last => {
-                    self.lower_value(expr, self.ret)?;
-                    self.seal(self.cur, Terminator::Halt)?;
-                    Flow::Diverged
-                }
-                other => {
-                    return Err(err(
-                        other,
-                        "only `let`, `if`, `return`, and a final expression are supported yet",
-                    ));
-                }
+            let flow = if last {
+                self.lower_tail(stmt)?
+            } else {
+                self.lower_stmt(stmt)?
             };
             if flow == Flow::Diverged {
                 return Ok(());
             }
         }
         Err(err(block, "the function must end by returning a value"))
+    }
+
+    /// Lowers the last statement of the function body, where an expression is the
+    /// returned value.
+    fn lower_tail(&mut self, stmt: &syn::Stmt) -> syn::Result<Flow> {
+        match stmt {
+            syn::Stmt::Expr(syn::Expr::Return(ret), _) => {
+                self.lower_return(ret)?;
+                Ok(Flow::Diverged)
+            }
+            syn::Stmt::Expr(syn::Expr::If(if_expr), None) => {
+                match self.lower_if_value(if_expr, self.ret)? {
+                    Value::Produced(_) => {
+                        self.seal(self.cur, Terminator::Halt)?;
+                        Ok(Flow::Diverged)
+                    }
+                    Value::Diverged => Ok(Flow::Diverged),
+                }
+            }
+            syn::Stmt::Expr(expr, None) if is_value_expr(expr) => {
+                self.lower_value(expr, self.ret)?;
+                self.seal(self.cur, Terminator::Halt)?;
+                Ok(Flow::Diverged)
+            }
+            other => self.lower_stmt(other),
+        }
+    }
+
+    /// Lowers a statement in statement position.
+    fn lower_stmt(&mut self, stmt: &syn::Stmt) -> syn::Result<Flow> {
+        match stmt {
+            syn::Stmt::Local(local) => {
+                self.lower_let(local)?;
+                Ok(Flow::Open)
+            }
+            syn::Stmt::Expr(expr, _) => match expr {
+                syn::Expr::Return(ret) => {
+                    self.lower_return(ret)?;
+                    Ok(Flow::Diverged)
+                }
+                syn::Expr::If(if_expr) => self.lower_if_stmt(if_expr),
+                syn::Expr::While(while_expr) => self.lower_while(while_expr),
+                syn::Expr::Loop(loop_expr) => self.lower_loop(loop_expr),
+                syn::Expr::Break(brk) => self.lower_break(brk),
+                syn::Expr::Continue(cont) => self.lower_continue(cont),
+                syn::Expr::Assign(assign) => {
+                    self.lower_assign(&assign.left, &assign.right)?;
+                    Ok(Flow::Open)
+                }
+                syn::Expr::Binary(binary) if compound(&binary.op).is_some() => {
+                    self.lower_compound(binary)?;
+                    Ok(Flow::Open)
+                }
+                other => Err(err(other, "this statement is not supported yet")),
+            },
+            other => Err(err(other, "this statement is not supported yet")),
+        }
+    }
+
+    /// Lowers a run of statements, stopping once a path has diverged.
+    fn lower_stmts(&mut self, stmts: &[syn::Stmt]) -> syn::Result<Flow> {
+        let mut flow = Flow::Open;
+        for stmt in stmts {
+            if flow == Flow::Diverged {
+                break;
+            }
+            flow = self.lower_stmt(stmt)?;
+        }
+        Ok(flow)
     }
 
     /// Lowers a `let`, storing the initializer into the local's cell.
@@ -210,6 +330,43 @@ impl Lowerer {
         Ok(())
     }
 
+    /// Lowers `x = e`: evaluate `e`, store it into the local `x`.
+    fn lower_assign(&mut self, target: &syn::Expr, value: &syn::Expr) -> syn::Result<()> {
+        let (cell, ty) = self.assign_target(target)?;
+        self.lower_value(value, ty)?;
+        self.store(cell)
+    }
+
+    /// Lowers `x op= e`: load `x`, apply `op` with `e`, store it back.
+    fn lower_compound(&mut self, binary: &syn::ExprBinary) -> syn::Result<()> {
+        let op = compound(&binary.op).ok_or_else(|| err(binary, "not a compound assignment"))?;
+        let (cell, ty) = self.assign_target(&binary.left)?;
+        self.load(cell)?;
+        let right = self.lower_expr(&binary.right, ty)?;
+        if right.width != ty.width {
+            return Err(err(binary, "the operands must be the same width"));
+        }
+        self.emit_op(op, ty)?;
+        self.store(cell)
+    }
+
+    /// Resolves an assignment target to the local cell it writes.
+    fn assign_target(&self, target: &syn::Expr) -> syn::Result<(CellId, Scalar)> {
+        let path = match target {
+            syn::Expr::Path(path) => path,
+            other => return Err(err(other, "only a local can be assigned to")),
+        };
+        let name = path
+            .path
+            .get_ident()
+            .ok_or_else(|| err(path, "only a local can be assigned to"))?;
+        match self.scope.get(&name.to_string()) {
+            Some(Binding::Local { cell, ty }) => Ok((*cell, *ty)),
+            Some(Binding::Param { .. }) => Err(err(name, "a parameter cannot be assigned to")),
+            None => Err(err(name, "no such local")),
+        }
+    }
+
     /// Lowers `return e`: leave the value on the stack, then halt.
     fn lower_return(&mut self, ret: &syn::ExprReturn) -> syn::Result<()> {
         let value = ret
@@ -218,6 +375,99 @@ impl Lowerer {
             .ok_or_else(|| err(ret, "the function must return a value"))?;
         self.lower_value(value, self.ret)?;
         self.seal(self.cur, Terminator::Halt)
+    }
+
+    /// Lowers `break`, jumping to the enclosing loop's exit.
+    fn lower_break(&mut self, brk: &syn::ExprBreak) -> syn::Result<Flow> {
+        if brk.expr.is_some() {
+            return Err(err(brk, "`break` with a value is not supported yet"));
+        }
+        let existing = self
+            .loops
+            .last()
+            .ok_or_else(|| err(brk, "`break` outside a loop"))?
+            .break_to;
+        let exit = match existing {
+            Some(exit) => exit,
+            None => {
+                let exit = self.builder.block(0);
+                if let Some(top) = self.loops.last_mut() {
+                    top.break_to = Some(exit);
+                }
+                exit
+            }
+        };
+        self.seal(self.cur, Terminator::Jmp(exit))?;
+        Ok(Flow::Diverged)
+    }
+
+    /// Lowers `continue`, jumping to the enclosing loop's head.
+    fn lower_continue(&mut self, cont: &syn::ExprContinue) -> syn::Result<Flow> {
+        let head = self
+            .loops
+            .last()
+            .ok_or_else(|| err(cont, "`continue` outside a loop"))?
+            .continue_to;
+        self.seal(self.cur, Terminator::Jmp(head))?;
+        Ok(Flow::Diverged)
+    }
+
+    /// Lowers `while cond { body }`.
+    fn lower_while(&mut self, while_expr: &syn::ExprWhile) -> syn::Result<Flow> {
+        let head = self.builder.block(0);
+        self.seal(self.cur, Terminator::Jmp(head))?;
+        self.cur = head;
+        self.lower_expr(&while_expr.cond, Scalar::BOOL)?;
+
+        let body = self.builder.block(0);
+        let exit = self.builder.block(0);
+        self.seal(
+            self.cur,
+            Terminator::Br {
+                then: body,
+                els: exit,
+            },
+        )?;
+
+        self.cur = body;
+        self.loops.push(Loop {
+            continue_to: head,
+            break_to: Some(exit),
+        });
+        let flow = self.lower_stmts(&while_expr.body.stmts)?;
+        self.loops.pop();
+        if flow == Flow::Open {
+            self.seal(self.cur, Terminator::Jmp(head))?;
+        }
+
+        // The condition being false always reaches the exit.
+        self.cur = exit;
+        Ok(Flow::Open)
+    }
+
+    /// Lowers `loop { body }`, which falls through only where it breaks.
+    fn lower_loop(&mut self, loop_expr: &syn::ExprLoop) -> syn::Result<Flow> {
+        let head = self.builder.block(0);
+        self.seal(self.cur, Terminator::Jmp(head))?;
+        self.cur = head;
+
+        self.loops.push(Loop {
+            continue_to: head,
+            break_to: None,
+        });
+        let flow = self.lower_stmts(&loop_expr.body.stmts)?;
+        let broke = self.loops.pop().and_then(|ctx| ctx.break_to);
+        if flow == Flow::Open {
+            self.seal(self.cur, Terminator::Jmp(head))?;
+        }
+
+        match broke {
+            Some(exit) => {
+                self.cur = exit;
+                Ok(Flow::Open)
+            }
+            None => Ok(Flow::Diverged),
+        }
     }
 
     /// Lowers an `if` used as a statement, tracking whether it falls through.
@@ -236,7 +486,7 @@ impl Lowerer {
                 },
             )?;
             self.cur = then_id;
-            if self.lower_branch(&if_expr.then_branch)? == Flow::Open {
+            if self.lower_stmts(&if_expr.then_branch.stmts)? == Flow::Open {
                 self.seal(self.cur, Terminator::Jmp(join))?;
             }
             self.cur = join;
@@ -254,7 +504,7 @@ impl Lowerer {
 
         self.cur = then_id;
         let then_exit =
-            (self.lower_branch(&if_expr.then_branch)? == Flow::Open).then_some(self.cur);
+            (self.lower_stmts(&if_expr.then_branch.stmts)? == Flow::Open).then_some(self.cur);
 
         self.cur = else_id;
         let else_exit = (self.lower_else_stmt(else_expr)? == Flow::Open).then_some(self.cur);
@@ -263,10 +513,7 @@ impl Lowerer {
             (None, None) => Ok(Flow::Diverged),
             _ => {
                 let join = self.builder.block(0);
-                if let Some(block) = then_exit {
-                    self.seal(block, Terminator::Jmp(join))?;
-                }
-                if let Some(block) = else_exit {
+                for block in [then_exit, else_exit].into_iter().flatten() {
                     self.seal(block, Terminator::Jmp(join))?;
                 }
                 self.cur = join;
@@ -278,44 +525,14 @@ impl Lowerer {
     /// Lowers the `else` of a statement `if`: another block, or an `else if`.
     fn lower_else_stmt(&mut self, else_expr: &syn::Expr) -> syn::Result<Flow> {
         match else_expr {
-            syn::Expr::Block(block) => self.lower_branch(&block.block),
+            syn::Expr::Block(block) => self.lower_stmts(&block.block.stmts),
             syn::Expr::If(if_expr) => self.lower_if_stmt(if_expr),
             other => Err(err(other, "an `else` must be a block or another `if`")),
         }
     }
 
-    /// Lowers a branch body: statements only, no value and no new locals.
-    fn lower_branch(&mut self, block: &syn::Block) -> syn::Result<Flow> {
-        for stmt in &block.stmts {
-            match stmt {
-                syn::Stmt::Expr(syn::Expr::Return(ret), _) => {
-                    self.lower_return(ret)?;
-                    return Ok(Flow::Diverged);
-                }
-                syn::Stmt::Expr(syn::Expr::If(if_expr), _) => {
-                    if self.lower_if_stmt(if_expr)? == Flow::Diverged {
-                        return Ok(Flow::Diverged);
-                    }
-                }
-                syn::Stmt::Local(local) => {
-                    return Err(err(
-                        &local.pat,
-                        "a `let` inside a branch is not supported yet",
-                    ));
-                }
-                other => {
-                    return Err(err(
-                        other,
-                        "only `if` and `return` are supported in a branch",
-                    ));
-                }
-            }
-        }
-        Ok(Flow::Open)
-    }
-
-    /// Lowers an `if` used as a value: both reached arms leave a value, and the
-    /// arms that return leave none.
+    /// Lowers an `if` used as a value: reached arms leave a value, arms that
+    /// leave do not.
     fn lower_if_value(&mut self, if_expr: &syn::ExprIf, expected: Scalar) -> syn::Result<Value> {
         let (_, else_expr) = if_expr
             .else_branch
@@ -368,30 +585,11 @@ impl Lowerer {
     /// Lowers a block that produces a value: statements, then a value or a
     /// return.
     fn lower_value_block(&mut self, block: &syn::Block, expected: Scalar) -> syn::Result<Value> {
-        let stmts = &block.stmts;
-        let (last, rest) = match stmts.split_last() {
-            Some(split) => split,
-            None => return Err(err(block, "a block used as a value must produce one")),
+        let Some((last, rest)) = block.stmts.split_last() else {
+            return Err(err(block, "a block used as a value must produce one"));
         };
-        for stmt in rest {
-            match stmt {
-                syn::Stmt::Expr(syn::Expr::Return(ret), _) => {
-                    self.lower_return(ret)?;
-                    return Ok(Value::Diverged);
-                }
-                syn::Stmt::Expr(syn::Expr::If(if_expr), _) => {
-                    if self.lower_if_stmt(if_expr)? == Flow::Diverged {
-                        return Ok(Value::Diverged);
-                    }
-                }
-                syn::Stmt::Local(local) => {
-                    return Err(err(
-                        &local.pat,
-                        "a `let` inside a branch is not supported yet",
-                    ));
-                }
-                other => return Err(err(other, "only `if` and `return` are supported here")),
-            }
+        if self.lower_stmts(rest)? == Flow::Diverged {
+            return Ok(Value::Diverged);
         }
         match last {
             syn::Stmt::Expr(syn::Expr::Return(ret), _) => {
@@ -492,7 +690,7 @@ impl Lowerer {
                     self.push_instr(CmpEq)?;
                     Ok(Scalar::BOOL)
                 } else {
-                    self.push_instr(safetynet_core::isa::BitNot)?;
+                    self.push_instr(BitNot)?;
                     Ok(ty)
                 }
             }
@@ -502,10 +700,13 @@ impl Lowerer {
 
     /// Lowers a binary operation and the operator on top of it.
     fn lower_binary(&mut self, binary: &syn::ExprBinary, expected: Scalar) -> syn::Result<Scalar> {
+        let op =
+            plain(&binary.op).ok_or_else(|| err(binary, "this operator is not supported yet"))?;
+
         // The operands share a type of their own; a comparison's `bool` result is
-        // not it. Infer that type from whichever operand names one, falling back
-        // to the result type for arithmetic and to `i32` for a bare comparison.
-        let fallback = if is_comparison(&binary.op) {
+        // not it. Infer it from whichever operand names one, falling back to the
+        // result type for arithmetic and to `i32` for a bare comparison.
+        let fallback = if op.is_comparison() {
             Scalar::I32
         } else {
             expected
@@ -517,8 +718,7 @@ impl Lowerer {
 
         // `>` and `>=` are the mirror of `<` and `<=`, so they lower their
         // operands in the other order and reuse the same opcode.
-        let swap = matches!(binary.op, syn::BinOp::Gt(_) | syn::BinOp::Ge(_));
-        let (first, second) = if swap {
+        let (first, second) = if swaps(&binary.op) {
             (&*binary.right, &*binary.left)
         } else {
             (&*binary.left, &*binary.right)
@@ -528,7 +728,7 @@ impl Lowerer {
         if left.width != right.width {
             return Err(err(binary, "the operands must be the same width"));
         }
-        self.emit_op(binary, operand)
+        self.emit_op(op, operand)
     }
 
     /// The type an expression will have, when that is known without lowering it.
@@ -548,44 +748,37 @@ impl Lowerer {
                 lit: syn::Lit::Bool(_),
                 ..
             }) => Some(Scalar::BOOL),
-            syn::Expr::Binary(binary) if is_comparison(&binary.op) => Some(Scalar::BOOL),
-            syn::Expr::Binary(binary) => {
-                self.peek(&binary.left).or_else(|| self.peek(&binary.right))
-            }
+            syn::Expr::Binary(binary) => match plain(&binary.op) {
+                Some(op) if op.is_comparison() => Some(Scalar::BOOL),
+                _ => self.peek(&binary.left).or_else(|| self.peek(&binary.right)),
+            },
             _ => None,
         }
     }
 
-    /// Emits the opcode a binary operator lowers to, and reports its result
-    /// type.
-    fn emit_op(&mut self, binary: &syn::ExprBinary, ty: Scalar) -> syn::Result<Scalar> {
-        use syn::BinOp;
-        match binary.op {
-            BinOp::Add(_) => self.push_instr(Add)?,
-            BinOp::Sub(_) => self.push_instr(Sub)?,
-            BinOp::Mul(_) => self.push_instr(Mul)?,
-            BinOp::Div(_) => self.push_instr(signed(ty, Instr::from(SDiv), Div.into()))?,
-            BinOp::Rem(_) => self.push_instr(signed(ty, SRem.into(), Rem.into()))?,
-            BinOp::BitAnd(_) => self.push_instr(And)?,
-            BinOp::BitOr(_) => self.push_instr(Or)?,
-            BinOp::BitXor(_) => self.push_instr(Xor)?,
-            BinOp::Shl(_) => self.push_instr(Shl)?,
-            BinOp::Shr(_) => self.push_instr(signed(ty, Sar.into(), Shr.into()))?,
-            BinOp::Eq(_) => return self.cmp(CmpEq.into()),
-            BinOp::Lt(_) | BinOp::Gt(_) => {
-                return self.cmp(signed(ty, CmpSLt.into(), CmpLt.into()));
-            }
-            BinOp::Le(_) | BinOp::Ge(_) => {
-                return self.cmp(signed(ty, CmpSLe.into(), CmpLe.into()));
-            }
-            BinOp::Ne(_) => {
+    /// Emits the opcode an operator lowers to, and reports its result type.
+    fn emit_op(&mut self, op: Op, ty: Scalar) -> syn::Result<Scalar> {
+        match op {
+            Op::Add => self.push_instr(Add)?,
+            Op::Sub => self.push_instr(Sub)?,
+            Op::Mul => self.push_instr(Mul)?,
+            Op::Div => self.push_instr(signed(ty, Instr::from(SDiv), Div.into()))?,
+            Op::Rem => self.push_instr(signed(ty, SRem.into(), Rem.into()))?,
+            Op::And => self.push_instr(And)?,
+            Op::Or => self.push_instr(Or)?,
+            Op::Xor => self.push_instr(Xor)?,
+            Op::Shl => self.push_instr(Shl)?,
+            Op::Shr => self.push_instr(signed(ty, Sar.into(), Shr.into()))?,
+            Op::Eq => return self.cmp(CmpEq.into()),
+            Op::Lt => return self.cmp(signed(ty, CmpSLt.into(), CmpLt.into())),
+            Op::Le => return self.cmp(signed(ty, CmpSLe.into(), CmpLe.into())),
+            Op::Ne => {
                 self.push_instr(CmpEq)?;
                 // Negate the flag: it equals zero exactly when the values differed.
                 self.push_word(0)?;
                 self.push_instr(CmpEq)?;
                 return Ok(Scalar::BOOL);
             }
-            other => return Err(err(other, "this operator is not supported yet")),
         }
         Ok(ty)
     }
@@ -620,13 +813,13 @@ impl Lowerer {
     }
 
     /// Appends a load from a frame cell.
-    fn load(&mut self, cell: safetynet_core::ir::CellId) -> syn::Result<()> {
+    fn load(&mut self, cell: CellId) -> syn::Result<()> {
         self.body()?.load(cell);
         Ok(())
     }
 
     /// Appends a store into a frame cell.
-    fn store(&mut self, cell: safetynet_core::ir::CellId) -> syn::Result<()> {
+    fn store(&mut self, cell: CellId) -> syn::Result<()> {
         self.body()?.store(cell);
         Ok(())
     }
@@ -643,12 +836,79 @@ impl Lowerer {
     }
 }
 
+impl Op {
+    /// Whether the operator compares, yielding a boolean.
+    fn is_comparison(self) -> bool {
+        matches!(self, Op::Eq | Op::Ne | Op::Lt | Op::Le)
+    }
+}
+
+/// The plain operator a binary expression uses, if it is one that is supported.
+fn plain(op: &syn::BinOp) -> Option<Op> {
+    use syn::BinOp;
+    Some(match op {
+        BinOp::Add(_) => Op::Add,
+        BinOp::Sub(_) => Op::Sub,
+        BinOp::Mul(_) => Op::Mul,
+        BinOp::Div(_) => Op::Div,
+        BinOp::Rem(_) => Op::Rem,
+        BinOp::BitAnd(_) => Op::And,
+        BinOp::BitOr(_) => Op::Or,
+        BinOp::BitXor(_) => Op::Xor,
+        BinOp::Shl(_) => Op::Shl,
+        BinOp::Shr(_) => Op::Shr,
+        BinOp::Eq(_) => Op::Eq,
+        BinOp::Ne(_) => Op::Ne,
+        BinOp::Lt(_) => Op::Lt,
+        BinOp::Le(_) => Op::Le,
+        BinOp::Gt(_) => Op::Lt,
+        BinOp::Ge(_) => Op::Le,
+        _ => return None,
+    })
+}
+
+/// The plain operator a compound assignment applies, if it is a supported one.
+fn compound(op: &syn::BinOp) -> Option<Op> {
+    use syn::BinOp;
+    Some(match op {
+        BinOp::AddAssign(_) => Op::Add,
+        BinOp::SubAssign(_) => Op::Sub,
+        BinOp::MulAssign(_) => Op::Mul,
+        BinOp::DivAssign(_) => Op::Div,
+        BinOp::RemAssign(_) => Op::Rem,
+        BinOp::BitAndAssign(_) => Op::And,
+        BinOp::BitOrAssign(_) => Op::Or,
+        BinOp::BitXorAssign(_) => Op::Xor,
+        BinOp::ShlAssign(_) => Op::Shl,
+        BinOp::ShrAssign(_) => Op::Shr,
+        _ => return None,
+    })
+}
+
+/// Whether a binary operator swaps its operands (`>` and `>=`).
+fn swaps(op: &syn::BinOp) -> bool {
+    matches!(op, syn::BinOp::Gt(_) | syn::BinOp::Ge(_))
+}
+
 /// The block a value arm exits from, if it produced a value.
 fn value_exit(value: Value, exit: BlockId) -> Option<(BlockId, Scalar)> {
     match value {
         Value::Produced(scalar) => Some((exit, scalar)),
         Value::Diverged => None,
     }
+}
+
+/// Whether an expression can stand as a block's produced value.
+fn is_value_expr(expr: &syn::Expr) -> bool {
+    matches!(
+        expr,
+        syn::Expr::Lit(_)
+            | syn::Expr::Path(_)
+            | syn::Expr::Paren(_)
+            | syn::Expr::Unary(_)
+            | syn::Expr::Binary(_)
+            | syn::Expr::Block(_)
+    )
 }
 
 /// Picks the signed or unsigned opcode by the operand type.
@@ -658,15 +918,6 @@ fn signed(ty: Scalar, when_signed: Instr, when_unsigned: Instr) -> Instr {
     } else {
         when_unsigned
     }
-}
-
-/// Whether an operator compares (yielding a boolean) rather than computes.
-fn is_comparison(op: &syn::BinOp) -> bool {
-    use syn::BinOp;
-    matches!(
-        op,
-        BinOp::Eq(_) | BinOp::Ne(_) | BinOp::Lt(_) | BinOp::Le(_) | BinOp::Gt(_) | BinOp::Ge(_)
-    )
 }
 
 /// The load opcode for a width.
