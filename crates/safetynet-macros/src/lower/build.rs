@@ -342,7 +342,7 @@ impl Lowerer {
         let op = compound(&binary.op).ok_or_else(|| err(binary, "not a compound assignment"))?;
         let (cell, ty) = self.assign_target(&binary.left)?;
         self.load(cell)?;
-        let right = self.lower_expr(&binary.right, ty)?;
+        let right = self.lower_expr(&binary.right, ty, WORD)?;
         if right.width != ty.width {
             return Err(err(binary, "the operands must be the same width"));
         }
@@ -417,7 +417,7 @@ impl Lowerer {
         let head = self.builder.block(0);
         self.seal(self.cur, Terminator::Jmp(head))?;
         self.cur = head;
-        self.lower_expr(&while_expr.cond, Scalar::BOOL)?;
+        self.lower_expr(&while_expr.cond, Scalar::BOOL, 0)?;
 
         let body = self.builder.block(0);
         let exit = self.builder.block(0);
@@ -472,7 +472,7 @@ impl Lowerer {
 
     /// Lowers an `if` used as a statement, tracking whether it falls through.
     fn lower_if_stmt(&mut self, if_expr: &syn::ExprIf) -> syn::Result<Flow> {
-        self.lower_expr(&if_expr.cond, Scalar::BOOL)?;
+        self.lower_expr(&if_expr.cond, Scalar::BOOL, 0)?;
         let then_id = self.builder.block(0);
 
         let Some((_, else_expr)) = &if_expr.else_branch else {
@@ -539,7 +539,7 @@ impl Lowerer {
             .as_ref()
             .ok_or_else(|| err(if_expr, "an `if` used as a value needs an `else`"))?;
 
-        self.lower_expr(&if_expr.cond, Scalar::BOOL)?;
+        self.lower_expr(&if_expr.cond, Scalar::BOOL, 0)?;
         let then_id = self.builder.block(0);
         let else_id = self.builder.block(0);
         self.seal(
@@ -616,18 +616,26 @@ impl Lowerer {
                 Value::Produced(scalar) => Ok(scalar),
                 Value::Diverged => Err(err(block, "this block never produces a value")),
             },
-            other => self.lower_expr(other, expected),
+            other => self.lower_expr(other, expected, 0),
         }
     }
 
     /// Lowers a plain expression, leaving its value on top of the stack.
-    fn lower_expr(&mut self, expr: &syn::Expr, expected: Scalar) -> syn::Result<Scalar> {
+    ///
+    /// `depth` is the operand-stack depth in bytes on entry: `&&`/`||` split
+    /// into blocks whose entry depth this pins.
+    fn lower_expr(
+        &mut self,
+        expr: &syn::Expr,
+        expected: Scalar,
+        depth: u32,
+    ) -> syn::Result<Scalar> {
         match expr {
             syn::Expr::Lit(lit) => self.lower_lit(lit, expected),
             syn::Expr::Path(path) => self.lower_path(path),
-            syn::Expr::Paren(paren) => self.lower_expr(&paren.expr, expected),
-            syn::Expr::Unary(unary) => self.lower_unary(unary, expected),
-            syn::Expr::Binary(binary) => self.lower_binary(binary, expected),
+            syn::Expr::Paren(paren) => self.lower_expr(&paren.expr, expected, depth),
+            syn::Expr::Unary(unary) => self.lower_unary(unary, expected, depth),
+            syn::Expr::Binary(binary) => self.lower_binary(binary, expected, depth),
             other => Err(err(other, "this expression is not supported yet")),
         }
     }
@@ -673,17 +681,22 @@ impl Lowerer {
     }
 
     /// Lowers a unary operator.
-    fn lower_unary(&mut self, unary: &syn::ExprUnary, expected: Scalar) -> syn::Result<Scalar> {
+    fn lower_unary(
+        &mut self,
+        unary: &syn::ExprUnary,
+        expected: Scalar,
+        depth: u32,
+    ) -> syn::Result<Scalar> {
         match unary.op {
             // Negation is `0 - x`, which the wrapping subtraction handles.
             syn::UnOp::Neg(_) => {
                 self.push_word(0)?;
-                let ty = self.lower_expr(&unary.expr, expected)?;
+                let ty = self.lower_expr(&unary.expr, expected, depth + WORD)?;
                 self.push_instr(Sub)?;
                 Ok(ty)
             }
             syn::UnOp::Not(_) => {
-                let ty = self.lower_expr(&unary.expr, expected)?;
+                let ty = self.lower_expr(&unary.expr, expected, depth)?;
                 if ty == Scalar::BOOL {
                     // Logical not: the flag is one exactly when the value was zero.
                     self.push_word(0)?;
@@ -699,7 +712,16 @@ impl Lowerer {
     }
 
     /// Lowers a binary operation and the operator on top of it.
-    fn lower_binary(&mut self, binary: &syn::ExprBinary, expected: Scalar) -> syn::Result<Scalar> {
+    fn lower_binary(
+        &mut self,
+        binary: &syn::ExprBinary,
+        expected: Scalar,
+        depth: u32,
+    ) -> syn::Result<Scalar> {
+        if let Some(and) = logical(&binary.op) {
+            return self.lower_and_or(binary, and, depth);
+        }
+
         let op =
             plain(&binary.op).ok_or_else(|| err(binary, "this operator is not supported yet"))?;
 
@@ -723,12 +745,54 @@ impl Lowerer {
         } else {
             (&*binary.left, &*binary.right)
         };
-        let left = self.lower_expr(first, operand)?;
-        let right = self.lower_expr(second, operand)?;
+        let left = self.lower_expr(first, operand, depth)?;
+        let right = self.lower_expr(second, operand, depth + WORD)?;
         if left.width != right.width {
             return Err(err(binary, "the operands must be the same width"));
         }
         self.emit_op(op, operand)
+    }
+
+    /// Lowers `&&` or `||`, evaluating the right side only when it is reached.
+    ///
+    /// The left value is branched on and popped; each path then leaves one
+    /// boolean, so the join is entered one word deeper than the operator began.
+    fn lower_and_or(
+        &mut self,
+        binary: &syn::ExprBinary,
+        is_and: bool,
+        depth: u32,
+    ) -> syn::Result<Scalar> {
+        self.lower_expr(&binary.left, Scalar::BOOL, depth)?;
+        let rhs = self.builder.block(depth);
+        let shortcut = self.builder.block(depth);
+        let join = self.builder.block(depth + WORD);
+
+        // `&&` runs the right side when the left is true; `||`, when it is false.
+        let branch = if is_and {
+            Terminator::Br {
+                then: rhs,
+                els: shortcut,
+            }
+        } else {
+            Terminator::Br {
+                then: shortcut,
+                els: rhs,
+            }
+        };
+        self.seal(self.cur, branch)?;
+
+        self.cur = rhs;
+        self.lower_expr(&binary.right, Scalar::BOOL, depth)?;
+        self.seal(self.cur, Terminator::Jmp(join))?;
+
+        // The short-circuit result: `&&` yields false, `||` yields true.
+        self.cur = shortcut;
+        self.push_word(u64::from(!is_and))?;
+        self.seal(self.cur, Terminator::Jmp(join))?;
+
+        self.cur = join;
+        Ok(Scalar::BOOL)
     }
 
     /// The type an expression will have, when that is known without lowering it.
@@ -748,6 +812,7 @@ impl Lowerer {
                 lit: syn::Lit::Bool(_),
                 ..
             }) => Some(Scalar::BOOL),
+            syn::Expr::Binary(binary) if logical(&binary.op).is_some() => Some(Scalar::BOOL),
             syn::Expr::Binary(binary) => match plain(&binary.op) {
                 Some(op) if op.is_comparison() => Some(Scalar::BOOL),
                 _ => self.peek(&binary.left).or_else(|| self.peek(&binary.right)),
@@ -888,6 +953,15 @@ fn compound(op: &syn::BinOp) -> Option<Op> {
 /// Whether a binary operator swaps its operands (`>` and `>=`).
 fn swaps(op: &syn::BinOp) -> bool {
     matches!(op, syn::BinOp::Gt(_) | syn::BinOp::Ge(_))
+}
+
+/// The short-circuit operators: `Some(true)` for `&&`, `Some(false)` for `||`.
+fn logical(op: &syn::BinOp) -> Option<bool> {
+    match op {
+        syn::BinOp::And(_) => Some(true),
+        syn::BinOp::Or(_) => Some(false),
+        _ => None,
+    }
 }
 
 /// The block a value arm exits from, if it produced a value.

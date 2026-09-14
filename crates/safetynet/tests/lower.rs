@@ -241,3 +241,64 @@ fn a_loop_continues() {
     // 1..=6 without the multiples of three: 1+2+4+5 = 12.
     assert_eq!(sum_skipping_threes(6), 12);
 }
+
+#[safetynet]
+fn both(a: bool, b: bool) -> bool {
+    a && b
+}
+
+#[safetynet]
+fn either(a: bool, b: bool) -> bool {
+    a || b
+}
+
+#[safetynet]
+fn in_range(x: u32, lo: u32, hi: u32) -> bool {
+    lo <= x && x < hi
+}
+
+#[safetynet]
+fn all_three(a: bool, b: bool, c: bool) -> bool {
+    a && b && c
+}
+
+#[safetynet]
+fn safe_divisor(x: u32, d: u32) -> bool {
+    // If `d` is zero the right side would trap, so `&&` must not evaluate it.
+    d != 0 && x / d > 0
+}
+
+#[test]
+fn logical_and_computes() {
+    assert!(both(true, true));
+    assert!(!both(true, false));
+    assert!(!both(false, true));
+}
+
+#[test]
+fn logical_or_computes() {
+    assert!(either(false, true));
+    assert!(either(true, false));
+    assert!(!either(false, false));
+}
+
+#[test]
+fn a_range_check_uses_two_comparisons() {
+    assert!(in_range(5, 1, 10));
+    assert!(!in_range(0, 1, 10));
+    assert!(!in_range(10, 1, 10));
+}
+
+#[test]
+fn a_chain_of_ands_runs() {
+    assert!(all_three(true, true, true));
+    assert!(!all_three(true, false, true));
+}
+
+#[test]
+fn and_short_circuits_before_a_trap() {
+    // Were the right side evaluated, `x / 0` would trap and panic the run.
+    assert!(!safe_divisor(10, 0));
+    assert!(safe_divisor(10, 2));
+    assert!(!safe_divisor(1, 2));
+}

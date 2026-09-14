@@ -138,3 +138,18 @@ fn a_break_outside_a_loop_is_refused() {
 fn assigning_a_parameter_is_refused() {
     assert!(refusal("fn f(x: u32) -> u32 { x = 1; x }").contains("parameter"));
 }
+
+#[test]
+fn a_short_circuit_and_round_trips() {
+    assert_round_trips(&graph("fn f(a: bool, b: bool) -> bool { a && b }"));
+}
+
+#[test]
+fn a_short_circuit_or_round_trips() {
+    assert_round_trips(&graph("fn f(x: u32) -> bool { x > 0 || x < 5 }"));
+}
+
+#[test]
+fn a_range_check_round_trips() {
+    assert_round_trips(&graph("fn f(x: u32, hi: u32) -> bool { 0 < x && x < hi }"));
+}
