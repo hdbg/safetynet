@@ -13,6 +13,7 @@ safetynet-macros.workspace = true
 
 [dev-dependencies]
 macrotest = "1"
+proptest = "1"
 
 [lints]
 workspace = true

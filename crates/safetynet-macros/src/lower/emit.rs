@@ -3,8 +3,8 @@
 //! Four items come out: the original body, renamed and kept so the Rust
 //! compiler still type-checks it; the public function, which marshals its
 //! arguments into an image, runs the bytecode and reads the result back; the
-//! lowered bytecode itself; and a dead-code assertion per binding that its type
-//! is a `VmValue`.
+//! lowered bytecode itself; and dead-code assertions that each binding is a
+//! `VmValue` (scalars) or `VmLayout` (aggregate parameters).
 
 use proc_macro2::{Literal, TokenStream};
 use quote::{format_ident, quote};
@@ -40,6 +40,16 @@ pub(crate) fn expand(attr: TokenStream, item: TokenStream) -> syn::Result<TokenS
         aggregate,
         ret,
     } = build::lower(&func)?;
+
+    // A debugging window on the compiler: `SN_DUMP_ASM=1` prints what each
+    // function lowered to, as the assembly the disassembler would show.
+    if std::env::var_os("SN_DUMP_ASM").is_some() {
+        eprintln!(
+            "// {}\n{}",
+            func.sig.ident,
+            safetynet_core::asm::print(&cfg)
+        );
+    }
 
     let resolved = resolve(&cfg).map_err(|error| {
         syn::Error::new_spanned(&func.sig.ident, format!("cannot assemble: {error}"))
