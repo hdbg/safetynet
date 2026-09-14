@@ -104,6 +104,6 @@ crates/
                      layout descriptors, assembler, interpreter
   safetynet-macros   proc-macros: #[safetynet], #[derive(VmLayout)], asm!
   safetynet          the façade crate downstream code depends on
-  safetynet-demo     a sample challenge binary exercising the whole ISA
+  safetynet-demo     a sample cipher lowered from Rust with #[safetynet]
 docs/spec.md         the full specification and design review
 ```
