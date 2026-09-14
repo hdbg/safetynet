@@ -141,6 +141,9 @@ pub(crate) fn lower(program: Program) -> syn::Result<Lowered> {
                 RawItem::Core(Item::Tag(hole)) => {
                     body.tag(hole);
                 }
+                RawItem::Core(Item::LoadField(hole)) => {
+                    body.load_field(hole);
+                }
                 RawItem::Field { ty, path } => {
                     let hole = u32::try_from(field_refs.len()).map_err(|_| {
                         syn::Error::new(
@@ -149,6 +152,7 @@ pub(crate) fn lower(program: Program) -> syn::Result<Lowered> {
                         )
                     })?;
                     body.field(hole);
+                    let ty: syn::Type = syn::parse_quote!(#ty);
                     field_refs.push(FieldRef { ty, path });
                 }
                 RawItem::Tag(path) => {

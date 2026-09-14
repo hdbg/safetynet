@@ -33,8 +33,11 @@ pub(crate) fn expand(attr: TokenStream, item: TokenStream) -> syn::Result<TokenS
     let Lowered {
         cfg,
         bindings,
+        layouts,
+        field_refs,
         param_offsets,
         input_size,
+        aggregate,
         ret,
     } = build::lower(&func)?;
 
@@ -45,7 +48,7 @@ pub(crate) fn expand(attr: TokenStream, item: TokenStream) -> syn::Result<TokenS
     // The bytes are baked in one order; `Le` is the default until an argument
     // selects otherwise.
     let order: syn::Path = syn::parse_quote!(::safetynet::Le);
-    let program = backend::emit_artifact(&order, &resolved, &[], &[])?;
+    let program = backend::emit_artifact(&order, &resolved, &field_refs, &[])?;
 
     let name = &func.sig.ident;
     let hidden = format_ident!("__sn_ref_{name}");
@@ -61,21 +64,15 @@ pub(crate) fn expand(attr: TokenStream, item: TokenStream) -> syn::Result<TokenS
     let vis = &func.vis;
     let sig = &func.sig;
     let args = param_names(&func)?;
-    let offsets = param_offsets
-        .iter()
-        .map(|offset| Literal::usize_unsuffixed(*offset as usize));
-    let input_len = Literal::usize_unsuffixed(input_size as usize);
     let fuel = Literal::u64_suffixed(FUEL);
+    let (input_len, input_bytes, marshal) =
+        input_shape(aggregate.as_ref(), &args, &param_offsets, input_size);
     let public = quote! {
         #vis #sig {
-            let mut __sn_input = [0u8; #input_len];
-            #(
-                if let ::core::option::Option::Some(__sn_slot) = __sn_input.get_mut(#offsets..) {
-                    ::safetynet::VmLayout::marshal::<::safetynet::Le>(&#args, __sn_slot);
-                }
-            )*
+            let mut __sn_input = #input_len;
+            #marshal
             let __sn_layout = match ::safetynet::Layout::new(::safetynet::image::Sizes {
-                input: #input_size,
+                input: #input_bytes,
                 scratch: 0,
                 stack: #stack,
             }) {
@@ -106,11 +103,14 @@ pub(crate) fn expand(attr: TokenStream, item: TokenStream) -> syn::Result<TokenS
         }
     };
 
-    // A non-`VmValue` binding fails to compile, pointed at its own type.
+    // A scalar that is not `VmValue`, or an aggregate that is not `VmLayout`,
+    // fails to compile, pointed at its own type.
     let assertions = quote! {
         const _: fn() = || {
             fn __sn_assert_vm_value<__T: ::safetynet::VmValue>() {}
+            fn __sn_assert_vm_layout<__T: ::safetynet::VmLayout>() {}
             #( __sn_assert_vm_value::<#bindings>(); )*
+            #( __sn_assert_vm_layout::<#layouts>(); )*
         };
     };
 
@@ -127,6 +127,41 @@ pub(crate) fn expand(attr: TokenStream, item: TokenStream) -> syn::Result<TokenS
         #embedded
         #assertions
     })
+}
+
+/// The input buffer, the `.input` size, and the marshalling that fills it.
+///
+/// Scalars pack at their offsets; a single aggregate fills the buffer through
+/// its own `marshal`, sized by its `VmLayout::SIZE`.
+fn input_shape(
+    aggregate: Option<&syn::Type>,
+    args: &[syn::Ident],
+    param_offsets: &[u32],
+    input_size: u32,
+) -> (TokenStream, TokenStream, TokenStream) {
+    if let (Some(ty), Some(arg)) = (aggregate, args.first()) {
+        return (
+            quote! { [0u8; <#ty as ::safetynet::VmLayout>::SIZE] },
+            quote! { <#ty as ::safetynet::VmLayout>::SIZE as u32 },
+            quote! { ::safetynet::VmLayout::marshal::<::safetynet::Le>(&#arg, &mut __sn_input); },
+        );
+    }
+
+    let len = Literal::usize_unsuffixed(input_size as usize);
+    let offsets = param_offsets
+        .iter()
+        .map(|offset| Literal::usize_unsuffixed(*offset as usize));
+    (
+        quote! { [0u8; #len] },
+        quote! { #input_size },
+        quote! {
+            #(
+                if let ::core::option::Option::Some(__sn_slot) = __sn_input.get_mut(#offsets..) {
+                    ::safetynet::VmLayout::marshal::<::safetynet::Le>(&#args, __sn_slot);
+                }
+            )*
+        },
+    )
 }
 
 /// The parameter names, to marshal in signature order.

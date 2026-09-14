@@ -22,6 +22,7 @@ use safetynet_core::isa::{
 use safetynet_core::{Instr, Region, Width};
 
 use super::ty::Scalar;
+use crate::backend::FieldRef;
 
 /// One word on the operand stack, in bytes: the depth a produced value adds.
 const WORD: u32 = 8;
@@ -31,11 +32,19 @@ const WORD: u32 = 8;
 #[derive(Debug)]
 pub(crate) struct Lowered {
     pub(crate) cfg: Cfg,
+    /// Types the call site must prove are `VmValue` (scalars).
     pub(crate) bindings: Vec<syn::Type>,
-    /// Each parameter's byte offset in `.input`, in signature order.
+    /// Types the call site must prove are `VmLayout` (aggregate parameters).
+    pub(crate) layouts: Vec<syn::Type>,
+    /// Field references, indexed by the hole id in [`Item::Field`] and
+    /// [`Item::LoadField`].
+    pub(crate) field_refs: Vec<FieldRef>,
+    /// Each scalar parameter's byte offset in `.input`, in signature order.
     pub(crate) param_offsets: Vec<u32>,
-    /// Bytes the parameters occupy: the size of the `.input` region.
+    /// Bytes the scalar parameters occupy, when there is no aggregate.
     pub(crate) input_size: u32,
+    /// The single aggregate parameter, if any: it fills `.input` on its own.
+    pub(crate) aggregate: Option<syn::Type>,
     /// The return type, read back from the top of the stack.
     pub(crate) ret: syn::Type,
 }
@@ -108,22 +117,38 @@ pub(crate) fn lower(func: &syn::ItemFn) -> syn::Result<Lowered> {
         )
     })?;
 
-    // Parameters first: their offsets in `.input`, and the scope they seed.
+    // Parameters first: scalars pack into `.input` at their offsets; a single
+    // aggregate fills `.input` on its own and is read by field.
     let mut bindings = Vec::new();
+    let mut layouts = Vec::new();
     let mut param_offsets = Vec::new();
     let mut scope: HashMap<String, Binding> = HashMap::new();
     let mut types: HashMap<String, Scalar> = HashMap::new();
+    let mut aggregate: Option<(String, syn::Type)> = None;
     let mut offset = 0u32;
     for arg in &func.sig.inputs {
         let (name, ty_node) = param(arg)?;
-        let scalar = Scalar::of(ty_node)
-            .ok_or_else(|| err(ty_node, "a parameter must be a scalar the machine can hold"))?;
-        offset = offset.next_multiple_of(scalar.align());
-        param_offsets.push(offset);
-        scope.insert(name.clone(), Binding::Param { offset, ty: scalar });
-        types.insert(name, scalar);
-        offset += scalar.size();
-        bindings.push(ty_node.clone());
+        match Scalar::of(ty_node) {
+            Some(scalar) => {
+                offset = offset.next_multiple_of(scalar.align());
+                param_offsets.push(offset);
+                scope.insert(name.clone(), Binding::Param { offset, ty: scalar });
+                types.insert(name, scalar);
+                offset += scalar.size();
+                bindings.push(ty_node.clone());
+            }
+            None => {
+                aggregate = Some((name, ty_node.clone()));
+                layouts.push(ty_node.clone());
+            }
+        }
+    }
+    // The aggregate reads from `.input` base, so nothing else may share it.
+    if aggregate.is_some() && func.sig.inputs.len() > 1 {
+        return Err(err(
+            &func.sig.inputs,
+            "an aggregate parameter must be the only parameter for now",
+        ));
     }
     let input_size = offset;
     bindings.push(ret_ty.clone());
@@ -149,10 +174,13 @@ pub(crate) fn lower(func: &syn::ItemFn) -> syn::Result<Lowered> {
         scope,
         cells: cells.into_iter(),
         loops: Vec::new(),
+        field_refs: Vec::new(),
+        aggregate: aggregate.clone(),
         cur: entry,
         ret,
     };
     lowerer.lower_fn_body(&func.block)?;
+    let field_refs = lowerer.field_refs;
     let cfg = lowerer
         .builder
         .build(entry)
@@ -161,8 +189,11 @@ pub(crate) fn lower(func: &syn::ItemFn) -> syn::Result<Lowered> {
     Ok(Lowered {
         cfg,
         bindings,
+        layouts,
+        field_refs,
         param_offsets,
         input_size,
+        aggregate: aggregate.map(|(_, ty)| ty),
         ret: ret_ty.clone(),
     })
 }
@@ -247,6 +278,10 @@ struct Lowerer {
     scope: HashMap<String, Binding>,
     cells: std::vec::IntoIter<CellId>,
     loops: Vec<Loop>,
+    /// Field references, appended as field accesses are lowered.
+    field_refs: Vec<FieldRef>,
+    /// The single aggregate parameter's name and type, if the function has one.
+    aggregate: Option<(String, syn::Type)>,
     /// The block instructions are being appended to.
     cur: BlockId,
     ret: Scalar,
@@ -739,8 +774,35 @@ impl Lowerer {
             syn::Expr::Paren(paren) => self.lower_expr(&paren.expr, expected, depth),
             syn::Expr::Unary(unary) => self.lower_unary(unary, expected, depth),
             syn::Expr::Binary(binary) => self.lower_binary(binary, expected, depth),
+            syn::Expr::Field(field) => self.lower_field_read(field),
             other => Err(err(other, "this expression is not supported yet")),
         }
+    }
+
+    /// Reads a field of the aggregate parameter.
+    ///
+    /// The offset and load width are both a field's, and both are resolved from
+    /// the aggregate's layout at link time, so the value returns as an unsigned
+    /// word — its own type is not knowable here.
+    fn lower_field_read(&mut self, field: &syn::ExprField) -> syn::Result<Scalar> {
+        let (root, path) = field_path(field)?;
+        let ty = match &self.aggregate {
+            Some((name, ty)) if *name == root => ty.clone(),
+            _ => return Err(err(field, "only the aggregate parameter has fields")),
+        };
+        let hole = u32::try_from(self.field_refs.len())
+            .map_err(|_| err(field, "too many field references"))?;
+        self.field_refs.push(FieldRef { ty, path });
+
+        // base + offset is the field's address; the load reads it at its width.
+        self.push_base(Region::Input)?;
+        self.body()?.field(hole);
+        self.push_instr(Add)?;
+        self.body()?.load_field(hole);
+        Ok(Scalar {
+            width: Width::U64,
+            signed: false,
+        })
     }
 
     /// Pushes a literal; its type is the context's, or `i32` with nothing to go
@@ -915,6 +977,11 @@ impl Lowerer {
                 lit: syn::Lit::Bool(_),
                 ..
             }) => Some(Scalar::BOOL),
+            // A field's own type is not known here; it reads as an unsigned word.
+            syn::Expr::Field(_) => Some(Scalar {
+                width: Width::U64,
+                signed: false,
+            }),
             syn::Expr::Binary(binary) if logical(&binary.op).is_some() => Some(Scalar::BOOL),
             syn::Expr::Binary(binary) => match plain(&binary.op) {
                 Some(op) if op.is_comparison() => Some(Scalar::BOOL),
@@ -1084,6 +1151,7 @@ fn is_value_expr(expr: &syn::Expr) -> bool {
             | syn::Expr::Paren(_)
             | syn::Expr::Unary(_)
             | syn::Expr::Binary(_)
+            | syn::Expr::Field(_)
             | syn::Expr::Block(_)
     )
 }
@@ -1094,6 +1162,31 @@ fn signed(ty: Scalar, when_signed: Instr, when_unsigned: Instr) -> Instr {
         when_signed
     } else {
         when_unsigned
+    }
+}
+
+/// The root name and dotted path of a field access, `p.a.b` → `(p, [a, b])`.
+fn field_path(field: &syn::ExprField) -> syn::Result<(String, Vec<syn::Ident>)> {
+    let member = match &field.member {
+        syn::Member::Named(ident) => ident.clone(),
+        syn::Member::Unnamed(_) => {
+            return Err(err(&field.member, "tuple fields are not supported"));
+        }
+    };
+    match &*field.base {
+        syn::Expr::Field(inner) => {
+            let (root, mut path) = field_path(inner)?;
+            path.push(member);
+            Ok((root, path))
+        }
+        syn::Expr::Path(path) => {
+            let root = path
+                .path
+                .get_ident()
+                .ok_or_else(|| err(path, "a field access must start from a parameter"))?;
+            Ok((root.to_string(), vec![member]))
+        }
+        other => Err(err(other, "a field access must start from a parameter")),
     }
 }
 

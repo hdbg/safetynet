@@ -10,14 +10,15 @@ use proc_macro2::{Literal, TokenStream};
 use quote::quote;
 use safetynet_core::encoding::{Packed, encode, push32_immediate, push64_immediate};
 use safetynet_core::ir::Resolved;
-use safetynet_core::{Be, Le, Region};
+use safetynet_core::isa::{Ld8, Ld32, Ld64};
+use safetynet_core::{Be, Instr, Le, Region};
 use syn::Path;
 use syn::spanned::Spanned;
 
 /// A field reference the call site resolves: its type and the path into it.
 #[derive(Debug)]
 pub(crate) struct FieldRef {
-    pub(crate) ty: Path,
+    pub(crate) ty: syn::Type,
     pub(crate) path: Vec<syn::Ident>,
 }
 
@@ -158,6 +159,39 @@ pub(crate) fn emit_artifact(
         }
     }
 
+    // A field load is one opcode byte at the instruction's own offset; the
+    // linker picks `ld8`/`ld32`/`ld64` from the field's size, so the three
+    // opcode bytes are probed from the encoder and ride along.
+    if !resolved.load_relocs().is_empty() {
+        let [ld8, ld32, ld64] = load_opcodes(which);
+        for reloc in resolved.load_relocs() {
+            let at = Literal::usize_suffixed(offsets.get(reloc.index).copied().unwrap_or_default());
+            let field = field_refs.get(reloc.hole as usize).ok_or_else(|| {
+                syn::Error::new(
+                    order.span(),
+                    "a field load reference went missing while assembling",
+                )
+            })?;
+            let ty = &field.ty;
+            let names = field
+                .path
+                .iter()
+                .map(|name| Literal::string(&name.to_string()));
+            patches.push(quote! {
+                ::safetynet::Patch {
+                    at: #at,
+                    width: 1,
+                    big_endian: false,
+                    hole: ::safetynet::Hole::Load {
+                        layout: <#ty as ::safetynet::VmLayout>::LAYOUT,
+                        path: &[#(#names),*],
+                        opcodes: [#ld8, #ld32, #ld64],
+                    },
+                }
+            });
+        }
+    }
+
     Ok(quote! {
         {
             const CODE: &[u8] = &::safetynet::link::<#len>(
@@ -171,6 +205,20 @@ pub(crate) fn emit_artifact(
             )
         }
     })
+}
+
+/// The `ld8`, `ld32` and `ld64` opcode bytes, so the linker can write the one a
+/// field's size calls for without a second copy of the wire format.
+fn load_opcodes(which: Order) -> [u8; 3] {
+    let byte = |instr: Instr| {
+        let mut bytes = Vec::new();
+        let _ = match which {
+            Order::Le => encode::<Le>(instr, &mut bytes),
+            Order::Be => encode::<Be>(instr, &mut bytes),
+        };
+        bytes.first().copied().unwrap_or_default()
+    };
+    [byte(Ld8.into()), byte(Ld32.into()), byte(Ld64.into())]
 }
 
 /// Reads the concrete order off the path's last segment.

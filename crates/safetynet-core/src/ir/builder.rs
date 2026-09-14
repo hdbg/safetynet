@@ -66,6 +66,12 @@ impl BlockBody {
         self
     }
 
+    /// Appends a field load whose width the layout of `hole` still owes.
+    pub fn load_field(&mut self, hole: u32) -> &mut Self {
+        self.code.push(Item::LoadField(hole));
+        self
+    }
+
     /// What has been written so far.
     pub fn code(&self) -> &[Item] {
         &self.code

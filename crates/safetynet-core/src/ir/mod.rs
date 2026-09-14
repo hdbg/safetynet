@@ -21,13 +21,13 @@ mod validate;
 
 pub use builder::{BlockBody, BuildError, Builder};
 pub use finalize::{
-    Artifact, BaseReloc, FieldReloc, NotFinal, Reloc, Resolved, TagReloc, assemble, assemble_with,
-    finalize, finalize_with, resolve,
+    Artifact, BaseReloc, FieldReloc, LoadReloc, NotFinal, Reloc, Resolved, TagReloc, assemble,
+    assemble_with, finalize, finalize_with, resolve,
 };
 pub use frame::{Cell, CellId, Frame};
 pub use validate::{Invalid, Limits, Where, validate, validate_with};
 
-use crate::isa::{Lds64, Push32, Sts64};
+use crate::isa::{Ld64, Lds64, Push32, Sts64};
 use crate::{Instr, Op, Region};
 
 #[cfg(test)]
@@ -75,6 +75,10 @@ pub enum Item {
     /// Push an enum variant's discriminant word, resolved once the type is
     /// known. The `u32` names the hole, like [`Item::Field`].
     Tag(u32),
+    /// Pop an address and push the field there, at a width resolved once the
+    /// aggregate's layout is known. The `u32` names the hole, like
+    /// [`Item::Field`], which supplies the offset this load reads from.
+    LoadField(u32),
 }
 
 impl Item {
@@ -93,6 +97,7 @@ impl Item {
             Self::Load(_) => Lds64 { disp: 0 }.sp_delta(),
             Self::Store(_) => Sts64 { disp: 0 }.sp_delta(),
             Self::Base(_) | Self::Field(_) | Self::Tag(_) => Push32 { imm: 0 }.sp_delta(),
+            Self::LoadField(_) => Ld64.sp_delta(),
         }
     }
 }

@@ -23,6 +23,17 @@ pub enum Hole {
     },
     /// A word the call site already computed, such as an enum discriminant.
     Word(u64),
+    /// The opcode of a load whose width is a field's size: the byte to write is
+    /// chosen from `opcodes` (for a 1-, 4- or 8-byte field) by the size the
+    /// layout gives the path.
+    Load {
+        /// The aggregate's layout.
+        layout: &'static TypeLayout,
+        /// The dotted path into it.
+        path: &'static [&'static str],
+        /// The `ld8`, `ld32` and `ld64` opcode bytes, probed from the encoder.
+        opcodes: [u8; 3],
+    },
 }
 
 /// A hole in the bytecode: where an immediate sits, how wide and in which order,
@@ -52,6 +63,17 @@ pub const fn link<const N: usize>(mut code: [u8; N], patches: &[Patch]) -> [u8; 
                 None => panic!("a field reference resolved to no field in its layout"),
             },
             Hole::Word(word) => word,
+            Hole::Load {
+                layout,
+                path,
+                opcodes,
+            } => match layout.size_of(path) {
+                Some(1) => opcodes[0] as u64,
+                Some(4) => opcodes[1] as u64,
+                Some(8) => opcodes[2] as u64,
+                Some(_) => panic!("a field load has no opcode for its width"),
+                None => panic!("a field load resolved to no field in its layout"),
+            },
         };
         code = write_immediate(code, patch.at, value, patch.width, patch.big_endian);
         rest = tail;
@@ -87,12 +109,44 @@ const fn write_immediate<const N: usize>(
 
 #[cfg(test)]
 mod tests {
-    #![allow(clippy::expect_used)]
+    #![allow(clippy::expect_used, clippy::indexing_slicing)]
 
     use super::*;
     use crate::encoding::{Packed, decode, encode, push32_immediate, push64_immediate};
-    use crate::isa::{Push32, Push64};
+    use crate::isa::{Ld8, Ld32, Ld64, Push32, Push64};
     use crate::{Be, Le};
+
+    /// The opcode byte an instruction encodes to.
+    fn opcode(instr: crate::Instr) -> u8 {
+        let mut bytes = Vec::new();
+        encode::<Le>(instr, &mut bytes).expect("encodes");
+        bytes[0]
+    }
+
+    /// A field load's opcode is chosen from the field's size: `flags` is one byte
+    /// (`ld8`), `seq` is four (`ld32`), `tag` is eight (`ld64`).
+    #[test]
+    fn a_field_load_picks_its_width() {
+        let opcodes = [opcode(Ld8.into()), opcode(Ld32.into()), opcode(Ld64.into())];
+        let load = |path: &'static [&'static str]| {
+            link::<1>(
+                [0],
+                &[Patch {
+                    at: 0,
+                    width: 1,
+                    big_endian: false,
+                    hole: Hole::Load {
+                        layout: &OUTER,
+                        path,
+                        opcodes,
+                    },
+                }],
+            )[0]
+        };
+        assert_eq!(load(&["kind"]), opcodes[0]);
+        assert_eq!(load(&["header", "seq"]), opcodes[1]);
+        assert_eq!(load(&["tag"]), opcodes[2]);
+    }
 
     static INNER: TypeLayout = TypeLayout::new(&[
         crate::Field::new("seq", 0, 4, None),

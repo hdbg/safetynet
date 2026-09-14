@@ -92,6 +92,7 @@ fn write_item(out: &mut String, item: Item) -> core::fmt::Result {
         // The type and path live outside the graph, so only the hole shows.
         Item::Field(hole) => write!(out, "$field #{hole}"),
         Item::Tag(hole) => write!(out, "$tag #{hole}"),
+        Item::LoadField(hole) => write!(out, "$loadfield #{hole}"),
     }
 }
 

@@ -76,6 +76,7 @@ fn __sn_program_inc() -> ::safetynet::Artifact<::safetynet::Le> {
 }
 const _: fn() = || {
     fn __sn_assert_vm_value<__T: ::safetynet::VmValue>() {}
+    fn __sn_assert_vm_layout<__T: ::safetynet::VmLayout>() {}
     __sn_assert_vm_value::<u32>();
     __sn_assert_vm_value::<u32>();
 };

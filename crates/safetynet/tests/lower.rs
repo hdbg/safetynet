@@ -368,3 +368,115 @@ fn a_for_loop_continues_to_the_increment() {
     // Odd numbers below 6: 1 + 3 + 5 = 9.
     assert_eq!(sum_odds_below(6), 9);
 }
+
+use safetynet::VmLayout;
+
+#[derive(Clone, Copy, VmLayout)]
+struct Packet {
+    seq: u32,
+    len: u32,
+    flags: u8,
+    tag: u64,
+}
+
+#[derive(Clone, Copy, VmLayout)]
+struct Header {
+    seq: u32,
+    kind: u8,
+}
+
+#[derive(Clone, Copy, VmLayout)]
+struct Message {
+    header: Header,
+    tag: u64,
+}
+
+#[safetynet]
+fn read_seq(p: Packet) -> u32 {
+    p.seq
+}
+
+#[safetynet]
+fn read_flags(p: Packet) -> u8 {
+    p.flags
+}
+
+#[safetynet]
+fn read_tag(p: Packet) -> u64 {
+    p.tag
+}
+
+#[safetynet]
+fn sum_fields(p: Packet) -> u32 {
+    p.seq + p.len
+}
+
+#[safetynet]
+fn flag_is_set(p: Packet) -> bool {
+    p.flags & 1 == 1
+}
+
+#[safetynet]
+fn clamp_seq(p: Packet) -> u32 {
+    if p.seq > 100 {
+        return 100;
+    }
+    p.seq
+}
+
+#[safetynet]
+fn nested_seq(m: Message) -> u32 {
+    m.header.seq
+}
+
+fn sample() -> Packet {
+    Packet {
+        seq: 7,
+        len: 35,
+        flags: 0b101,
+        tag: 0xdead_beef_0000_0042,
+    }
+}
+
+#[test]
+fn a_field_reads_at_its_width() {
+    let p = sample();
+    assert_eq!(read_seq(p), 7);
+    assert_eq!(read_flags(p), 0b101);
+    assert_eq!(read_tag(p), 0xdead_beef_0000_0042);
+}
+
+#[test]
+fn two_fields_combine() {
+    assert_eq!(sum_fields(sample()), 42);
+}
+
+#[test]
+fn a_flag_bit_is_tested() {
+    assert!(flag_is_set(sample()));
+    assert!(!flag_is_set(Packet {
+        flags: 0b100,
+        ..sample()
+    }));
+}
+
+#[test]
+fn a_field_drives_a_branch() {
+    assert_eq!(clamp_seq(sample()), 7);
+    assert_eq!(
+        clamp_seq(Packet {
+            seq: 500,
+            ..sample()
+        }),
+        100
+    );
+}
+
+#[test]
+fn a_nested_field_reads_through_the_path() {
+    let m = Message {
+        header: Header { seq: 9, kind: 2 },
+        tag: 1,
+    };
+    assert_eq!(nested_seq(m), 9);
+}
