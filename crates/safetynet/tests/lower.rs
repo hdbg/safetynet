@@ -302,3 +302,69 @@ fn and_short_circuits_before_a_trap() {
     assert!(safe_divisor(10, 2));
     assert!(!safe_divisor(1, 2));
 }
+
+#[safetynet]
+fn sum_range(n: u32) -> u32 {
+    let mut s: u32 = 0;
+    for i in 0..n {
+        s += i;
+    }
+    s
+}
+
+#[safetynet]
+fn count_between(a: u32, b: u32) -> u32 {
+    let mut c: u32 = 0;
+    for _ in a..b {
+        c += 1;
+    }
+    c
+}
+
+#[safetynet]
+fn first_at_least(n: u32, t: u32) -> u32 {
+    for i in 0..n {
+        if i >= t {
+            return i;
+        }
+    }
+    n
+}
+
+#[safetynet]
+fn sum_odds_below(n: u32) -> u32 {
+    let mut s: u32 = 0;
+    for i in 0..n {
+        if i % 2 == 0 {
+            continue;
+        }
+        s += i;
+    }
+    s
+}
+
+#[test]
+fn a_for_loop_sums_a_range() {
+    assert_eq!(sum_range(0), 0);
+    assert_eq!(sum_range(5), 10);
+    assert_eq!(sum_range(10), 45);
+}
+
+#[test]
+fn a_for_loop_counts_between_bounds() {
+    assert_eq!(count_between(2, 7), 5);
+    assert_eq!(count_between(4, 4), 0);
+}
+
+#[test]
+fn a_for_loop_returns_early() {
+    assert_eq!(first_at_least(10, 3), 3);
+    assert_eq!(first_at_least(10, 0), 0);
+    assert_eq!(first_at_least(3, 9), 3);
+}
+
+#[test]
+fn a_for_loop_continues_to_the_increment() {
+    // Odd numbers below 6: 1 + 3 + 5 = 9.
+    assert_eq!(sum_odds_below(6), 9);
+}

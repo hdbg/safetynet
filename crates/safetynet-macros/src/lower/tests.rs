@@ -153,3 +153,18 @@ fn a_short_circuit_or_round_trips() {
 fn a_range_check_round_trips() {
     assert_round_trips(&graph("fn f(x: u32, hi: u32) -> bool { 0 < x && x < hi }"));
 }
+
+#[test]
+fn a_for_loop_round_trips() {
+    assert_round_trips(&graph(
+        "fn f(n: u32) -> u32 { let mut s: u32 = 0; for i in 0..n { s += i; } s }",
+    ));
+}
+
+#[test]
+fn an_inclusive_range_is_refused() {
+    assert!(
+        refusal("fn f(n: u32) -> u32 { let mut s: u32 = 0; for i in 0..=n { s += i; } s }")
+            .contains("range")
+    );
+}

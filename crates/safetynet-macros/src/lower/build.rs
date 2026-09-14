@@ -112,6 +112,7 @@ pub(crate) fn lower(func: &syn::ItemFn) -> syn::Result<Lowered> {
     let mut bindings = Vec::new();
     let mut param_offsets = Vec::new();
     let mut scope: HashMap<String, Binding> = HashMap::new();
+    let mut types: HashMap<String, Scalar> = HashMap::new();
     let mut offset = 0u32;
     for arg in &func.sig.inputs {
         let (name, ty_node) = param(arg)?;
@@ -119,7 +120,8 @@ pub(crate) fn lower(func: &syn::ItemFn) -> syn::Result<Lowered> {
             .ok_or_else(|| err(ty_node, "a parameter must be a scalar the machine can hold"))?;
         offset = offset.next_multiple_of(scalar.align());
         param_offsets.push(offset);
-        scope.insert(name, Binding::Param { offset, ty: scalar });
+        scope.insert(name.clone(), Binding::Param { offset, ty: scalar });
+        types.insert(name, scalar);
         offset += scalar.size();
         bindings.push(ty_node.clone());
     }
@@ -127,10 +129,18 @@ pub(crate) fn lower(func: &syn::ItemFn) -> syn::Result<Lowered> {
     bindings.push(ret_ty.clone());
 
     // One cell per local, wherever it is declared, in the order lowering reaches
-    // them. Locals live in statement blocks; value blocks hold none.
+    // them. Locals live in statement blocks; value blocks hold none. `types`
+    // tracks the scalar of each name so a `for` bound's type can be read here,
+    // where the cell for its loop variable is allocated.
     let mut frame = Frame::new();
     let mut cells = Vec::new();
-    collect_cells(&func.block, &mut frame, &mut cells, &mut bindings)?;
+    collect_cells(
+        &func.block,
+        &mut frame,
+        &mut cells,
+        &mut bindings,
+        &mut types,
+    )?;
 
     let mut builder = Cfg::builder(frame);
     let entry = builder.block(0);
@@ -164,28 +174,45 @@ fn collect_cells(
     frame: &mut Frame,
     cells: &mut Vec<CellId>,
     bindings: &mut Vec<syn::Type>,
+    types: &mut HashMap<String, Scalar>,
 ) -> syn::Result<()> {
     for stmt in &block.stmts {
         match stmt {
             syn::Stmt::Local(local) => {
-                let (_, scalar, ty_node) = declared_local(local)?;
+                let (name, scalar, ty_node) = declared_local(local)?;
                 let cell = frame
                     .add(scalar.width)
                     .ok_or_else(|| err(&local.pat, "the frame is too large"))?;
                 cells.push(cell);
                 bindings.push(ty_node);
+                types.insert(name, scalar);
             }
             syn::Stmt::Expr(syn::Expr::If(if_expr), _) => {
-                collect_cells(&if_expr.then_branch, frame, cells, bindings)?;
+                collect_cells(&if_expr.then_branch, frame, cells, bindings, types)?;
                 if let Some((_, else_expr)) = &if_expr.else_branch {
-                    collect_else_cells(else_expr, frame, cells, bindings)?;
+                    collect_else_cells(else_expr, frame, cells, bindings, types)?;
                 }
             }
             syn::Stmt::Expr(syn::Expr::While(while_expr), _) => {
-                collect_cells(&while_expr.body, frame, cells, bindings)?;
+                collect_cells(&while_expr.body, frame, cells, bindings, types)?;
             }
             syn::Stmt::Expr(syn::Expr::Loop(loop_expr), _) => {
-                collect_cells(&loop_expr.body, frame, cells, bindings)?;
+                collect_cells(&loop_expr.body, frame, cells, bindings, types)?;
+            }
+            syn::Stmt::Expr(syn::Expr::ForLoop(for_expr), _) => {
+                // Two cells: the loop variable, and a snapshot of the end bound.
+                let (start, end) = range_bounds(for_expr)?;
+                let scalar = range_scalar(&|name| types.get(name).copied(), start, end);
+                for _ in 0..2 {
+                    let cell = frame
+                        .add(scalar.width)
+                        .ok_or_else(|| err(&for_expr.pat, "the frame is too large"))?;
+                    cells.push(cell);
+                }
+                if let Some(name) = for_var(for_expr)? {
+                    types.insert(name, scalar);
+                }
+                collect_cells(&for_expr.body, frame, cells, bindings, types)?;
             }
             _ => {}
         }
@@ -199,13 +226,14 @@ fn collect_else_cells(
     frame: &mut Frame,
     cells: &mut Vec<CellId>,
     bindings: &mut Vec<syn::Type>,
+    types: &mut HashMap<String, Scalar>,
 ) -> syn::Result<()> {
     match else_expr {
-        syn::Expr::Block(block) => collect_cells(&block.block, frame, cells, bindings),
+        syn::Expr::Block(block) => collect_cells(&block.block, frame, cells, bindings, types),
         syn::Expr::If(if_expr) => {
-            collect_cells(&if_expr.then_branch, frame, cells, bindings)?;
+            collect_cells(&if_expr.then_branch, frame, cells, bindings, types)?;
             if let Some((_, inner)) = &if_expr.else_branch {
-                collect_else_cells(inner, frame, cells, bindings)?;
+                collect_else_cells(inner, frame, cells, bindings, types)?;
             }
             Ok(())
         }
@@ -284,6 +312,7 @@ impl Lowerer {
                 syn::Expr::If(if_expr) => self.lower_if_stmt(if_expr),
                 syn::Expr::While(while_expr) => self.lower_while(while_expr),
                 syn::Expr::Loop(loop_expr) => self.lower_loop(loop_expr),
+                syn::Expr::ForLoop(for_expr) => self.lower_for(for_expr),
                 syn::Expr::Break(brk) => self.lower_break(brk),
                 syn::Expr::Continue(cont) => self.lower_continue(cont),
                 syn::Expr::Assign(assign) => {
@@ -441,6 +470,80 @@ impl Lowerer {
         }
 
         // The condition being false always reaches the exit.
+        self.cur = exit;
+        Ok(Flow::Open)
+    }
+
+    /// Lowers `for i in a..b { body }` as a counted loop.
+    ///
+    /// The end bound is snapshotted so mutating it in the body cannot change the
+    /// count. `continue` targets the increment, so the variable still advances.
+    fn lower_for(&mut self, for_expr: &syn::ExprForLoop) -> syn::Result<Flow> {
+        let (start, end) = range_bounds(for_expr)?;
+        let var = for_var(for_expr)?;
+        let scalar = range_scalar(&|name| self.scope.get(name).map(binding_scalar), start, end);
+
+        let i_cell = self
+            .cells
+            .next()
+            .ok_or_else(|| err(&for_expr.pat, "a loop variable without a cell"))?;
+        let end_cell = self
+            .cells
+            .next()
+            .ok_or_else(|| err(&for_expr.pat, "a loop bound without a cell"))?;
+
+        // i = start; end = b.
+        self.lower_expr(start, scalar, 0)?;
+        self.store(i_cell)?;
+        self.lower_expr(end, scalar, 0)?;
+        self.store(end_cell)?;
+        if let Some(name) = var {
+            self.scope.insert(
+                name,
+                Binding::Local {
+                    cell: i_cell,
+                    ty: scalar,
+                },
+            );
+        }
+
+        let head = self.builder.block(0);
+        self.seal(self.cur, Terminator::Jmp(head))?;
+        self.cur = head;
+        self.load(i_cell)?;
+        self.load(end_cell)?;
+        self.push_instr(signed(scalar, CmpSLt.into(), CmpLt.into()))?;
+
+        let body = self.builder.block(0);
+        let incr = self.builder.block(0);
+        let exit = self.builder.block(0);
+        self.seal(
+            self.cur,
+            Terminator::Br {
+                then: body,
+                els: exit,
+            },
+        )?;
+
+        self.cur = body;
+        self.loops.push(Loop {
+            continue_to: incr,
+            break_to: Some(exit),
+        });
+        let flow = self.lower_stmts(&for_expr.body.stmts)?;
+        self.loops.pop();
+        if flow == Flow::Open {
+            self.seal(self.cur, Terminator::Jmp(incr))?;
+        }
+
+        // Increment: i = i + 1, then back to the head.
+        self.cur = incr;
+        self.load(i_cell)?;
+        self.push_word(1)?;
+        self.push_instr(Add)?;
+        self.store(i_cell)?;
+        self.seal(self.cur, Terminator::Jmp(head))?;
+
         self.cur = exit;
         Ok(Flow::Open)
     }
@@ -992,6 +1095,65 @@ fn signed(ty: Scalar, when_signed: Instr, when_unsigned: Instr) -> Instr {
     } else {
         when_unsigned
     }
+}
+
+/// The scalar a binding carries.
+fn binding_scalar(binding: &Binding) -> Scalar {
+    match binding {
+        Binding::Param { ty, .. } | Binding::Local { ty, .. } => *ty,
+    }
+}
+
+/// The element type of a `for` range: whichever bound names a type, else `i32`.
+fn range_scalar(
+    lookup: &dyn Fn(&str) -> Option<Scalar>,
+    start: &syn::Expr,
+    end: &syn::Expr,
+) -> Scalar {
+    bound_scalar(lookup, start)
+        .or_else(|| bound_scalar(lookup, end))
+        .unwrap_or(Scalar::I32)
+}
+
+/// The type of a range bound, when it plainly names a parameter or local.
+fn bound_scalar(lookup: &dyn Fn(&str) -> Option<Scalar>, expr: &syn::Expr) -> Option<Scalar> {
+    match expr {
+        syn::Expr::Path(path) => path
+            .path
+            .get_ident()
+            .and_then(|name| lookup(&name.to_string())),
+        syn::Expr::Paren(paren) => bound_scalar(lookup, &paren.expr),
+        _ => None,
+    }
+}
+
+/// The name a `for` loop binds, or `None` for `_`.
+fn for_var(for_expr: &syn::ExprForLoop) -> syn::Result<Option<String>> {
+    match &*for_expr.pat {
+        syn::Pat::Wild(_) => Ok(None),
+        syn::Pat::Ident(pat) if pat.subpat.is_none() => Ok(Some(pat.ident.to_string())),
+        other => Err(err(other, "a `for` binding must be a name or `_`")),
+    }
+}
+
+/// The start and end of a `for` loop's exclusive range.
+fn range_bounds(for_expr: &syn::ExprForLoop) -> syn::Result<(&syn::Expr, &syn::Expr)> {
+    let range = match &*for_expr.expr {
+        syn::Expr::Range(range) => range,
+        other => return Err(err(other, "a `for` loop must iterate a range `a..b`")),
+    };
+    if !matches!(range.limits, syn::RangeLimits::HalfOpen(_)) {
+        return Err(err(range, "an inclusive `..=` range is not supported yet"));
+    }
+    let start = range
+        .start
+        .as_ref()
+        .ok_or_else(|| err(range, "the range needs a start"))?;
+    let end = range
+        .end
+        .as_ref()
+        .ok_or_else(|| err(range, "the range needs an end"))?;
+    Ok((start, end))
 }
 
 /// The load opcode for a width.
