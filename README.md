@@ -1,5 +1,7 @@
 ![safetynet](docs/banner.png)
 
+[![AI Slop Inside](https://sladge.net/badge.svg)](https://sladge.net)
+
 
 A Rust-embedded bytecode VM for reversing challenges: guest code becomes
 packed bytecode over a stack machine, built entirely at compile time.
