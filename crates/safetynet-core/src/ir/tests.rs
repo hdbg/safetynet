@@ -4,7 +4,128 @@ use super::*;
 use crate::isa::{Add, CmpEq, Halt, Push8};
 use crate::{Op, Width};
 
-// -- the frame ------------------------------------------------------------
+/// A graph with one block of every terminator shape in it, laid out so that
+/// each conditional meets a different fallthrough.
+fn every_shape() -> Cfg {
+    let mut frame = Frame::new();
+    let first = frame.add(Width::U32).expect("room");
+    let second = frame.add(Width::U8).expect("room");
+
+    let mut builder = Cfg::builder(frame);
+    let blocks: Vec<_> = (0..6).map(|_| builder.block(0)).collect();
+    let at = |index: usize| *blocks.get(index).expect("six blocks");
+
+    builder
+        .at(at(0))
+        .expect("open")
+        .base(Region::Input)
+        .load(first)
+        .store(second);
+    builder.seal(at(0), Terminator::Jmp(at(1))).expect("seals");
+
+    builder.at(at(1)).expect("open").instr(Push8 { imm: 7 });
+    builder
+        .seal(
+            at(1),
+            Terminator::Br {
+                then: at(4),
+                els: at(2),
+            },
+        )
+        .expect("seals");
+
+    builder.at(at(2)).expect("open").instr(Add);
+    builder
+        .seal(
+            at(2),
+            Terminator::Br {
+                then: at(3),
+                els: at(5),
+            },
+        )
+        .expect("seals");
+
+    builder
+        .seal(
+            at(3),
+            Terminator::Br {
+                then: at(0),
+                els: at(1),
+            },
+        )
+        .expect("seals");
+
+    builder
+        .seal(
+            at(4),
+            Terminator::Switch {
+                arms: vec![at(0), at(5)],
+                default: at(2),
+            },
+        )
+        .expect("seals");
+
+    builder.seal(at(5), Terminator::Halt).expect("seals");
+
+    builder.build(at(1)).expect("builds")
+}
+
+#[test]
+fn a_graph_debugs_as_an_assembly_listing() {
+    assert_eq!(
+        format!("{:?}", every_shape()),
+        concat!(
+            ".frame { c0: u32, c1: u8 }\n",
+            ".entry b1\n",
+            "b0:\n",
+            "    $push .input\n",
+            "    $load c0\n",
+            "    $store c1\n",
+            // Spelled out even though b1 is next: an edge is always visible,
+            // never left for the reader to infer from block order.
+            "    jmp b1\n",
+            "b1:\n",
+            "    push8 7\n",
+            // The zero arm is next, so only the non-zero one is named.
+            "    jnz b4\n",
+            "b2:\n",
+            "    add\n",
+            "    jz b5\n",
+            // Neither arm follows, so both are named.
+            "b3:\n",
+            "    br b0, b1\n",
+            "b4:\n",
+            "    switch [b0, b5] default b2\n",
+            "b5:\n",
+            "    halt\n",
+        )
+    );
+}
+
+/// A frame with no cells declares nothing, entry zero says nothing, and a table
+/// with no arms still prints its brackets.
+#[test]
+fn the_empty_shapes_still_print_something_readable() {
+    let mut builder = Cfg::builder(Frame::new());
+    let entry = builder.block(0);
+    let default = builder.block(0);
+
+    builder
+        .seal(
+            entry,
+            Terminator::Switch {
+                arms: Vec::new(),
+                default,
+            },
+        )
+        .expect("seals");
+    builder.seal(default, Terminator::Halt).expect("seals");
+
+    assert_eq!(
+        format!("{:?}", builder.build(entry).expect("builds")),
+        "b0:\n    switch [] default b1\nb1:\n    halt\n"
+    );
+}
 
 /// Cells are naturally aligned, so a narrow cell before a wide one leaves a gap
 /// rather than putting a word across a boundary. Frame layout and aggregate
@@ -78,8 +199,6 @@ fn a_frame_of_widths_stops_where_displacements_do() {
     );
 }
 
-// -- items and terminators ------------------------------------------------
-
 /// A symbolic access knows its stack effect without knowing its displacement.
 /// That is the whole reason the depth can be validated before anything is laid
 /// out — and the displacement is then computed from that depth.
@@ -133,8 +252,6 @@ fn a_terminator_names_every_block_it_can_reach() {
         [c, a, b]
     );
 }
-
-// -- the builder ----------------------------------------------------------
 
 /// A loop needs to name a block that does not exist yet, which is the reason
 /// ids are handed out before bodies are written.

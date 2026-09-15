@@ -4,7 +4,7 @@ use super::*;
 use crate::encoding::{EncodeError, Encoder, decode, encode, encoded_len};
 use crate::image::{Image, Layout, Region, Sizes};
 use crate::ir::{Frame, Terminator};
-use crate::isa::{Add, Halt, Push8, Sub, Switch};
+use crate::isa::{Add, Drop, Halt, Push8, Push32, Sub, Switch};
 use crate::samples::{Padded, layout, stack_image};
 use crate::vm::Vm;
 use crate::{Be, Le, Op, Width, Word};
@@ -92,7 +92,7 @@ fn disassemble<B: ByteOrder>(program: &Program<B>) -> Vec<Instr> {
     out
 }
 
-/// The phase's own bar: a graph built by hand runs on the machine.
+/// A graph built by hand runs on the machine.
 fn a_graph_runs_on_the_machine<B: ByteOrder>() {
     let program = finalize::<B>(&sum_to(5, false), &layout(1024)).expect("finalizes");
 
@@ -429,4 +429,145 @@ fn the_host_and_the_program_agree_without_a_shared_constant() {
 
     let mut vm = Vm::<Le>::new(image).run(&program, 100).expect("terminates");
     assert_eq!(vm.pop(), Ok(0xa5));
+}
+
+/// A graph small enough to finalize, with a branch and a cell in it.
+fn adds_two() -> Cfg {
+    let mut frame = Frame::new();
+    let total = frame.add(Width::U64).expect("room");
+
+    let mut builder = Cfg::builder(frame);
+    let entry = builder.block(0);
+    let done = builder.block(0);
+
+    builder
+        .at(entry)
+        .expect("open")
+        .instr(Push32 { imm: 0xdead_beef })
+        .instr(Drop)
+        .instr(Push8 { imm: 40 })
+        .instr(Push8 { imm: 2 })
+        .instr(Add)
+        .store(total);
+    builder.seal(entry, Terminator::Jmp(done)).expect("seals");
+
+    builder.at(done).expect("open").load(total);
+    builder.seal(done, Terminator::Halt).expect("seals");
+
+    builder.build(entry).expect("builds")
+}
+
+/// A graph whose only instruction pushes a region's base, so the one thing left
+/// to resolve is the address the layout owns.
+fn pushes(region: Region) -> Cfg {
+    let mut builder = Cfg::builder(Frame::new());
+    let entry = builder.block(0);
+    builder.at(entry).expect("open").base(region);
+    builder.seal(entry, Terminator::Halt).expect("seals");
+    builder.build(entry).expect("builds")
+}
+
+/// Decodes the first instruction of a finalized program.
+fn first<B: ByteOrder>(code: &[u8]) -> Instr {
+    decode::<B>(code).expect("decodes").0
+}
+
+/// Resolution takes no layout, so what it produces is the same whatever image
+/// the artifact later runs against: the code is one constant list, and a region
+/// base is left as a single relocation naming where it sits.
+#[test]
+fn resolving_is_independent_of_any_layout() {
+    let resolved = resolve(&pushes(Region::Input)).expect("resolves");
+    assert_eq!(
+        resolved.relocs(),
+        [BaseReloc {
+            index: 0,
+            region: Region::Input,
+        }],
+        "one push, one relocation, at the front of an empty frame",
+    );
+
+    let none = resolve(&adds_two()).expect("resolves");
+    assert!(
+        none.relocs().is_empty(),
+        "a graph that names no region owes no address",
+    );
+
+    // Nothing about the resolution depends on where it is called from.
+    assert_eq!(resolve(&adds_two()).expect("resolves").code(), none.code());
+}
+
+/// The relocation is what turns a placeholder push into the region's real base.
+#[test]
+fn a_relocation_fills_in_the_region_base() {
+    let layout = layout(1024);
+    let program = assemble::<Le>(&pushes(Region::Input))
+        .expect("assembles")
+        .finalize(&layout)
+        .expect("finalizes");
+
+    match first::<Le>(program.code()) {
+        Instr::Push32(op) => assert_eq!(op.imm, layout.span(Region::Input).base()),
+        other => panic!("expected a base push, got {other:?}"),
+    }
+}
+
+/// The public entry points agree: assembling then finalizing is exactly what the
+/// `finalize` shorthand does, in either byte order.
+fn assemble_then_finalize_matches_finalize<B: ByteOrder>() {
+    let cfg = adds_two();
+    let layout = layout(1024);
+
+    let staged = assemble::<B>(&cfg)
+        .expect("assembles")
+        .finalize(&layout)
+        .expect("finalizes");
+    let direct = finalize::<B>(&cfg, &layout).expect("finalizes");
+
+    assert_eq!(staged.code(), direct.code());
+    assert_eq!(staged.frame(), direct.frame());
+}
+
+#[test]
+fn assemble_then_finalize_matches_finalize_le() {
+    assemble_then_finalize_matches_finalize::<Le>();
+}
+
+#[test]
+fn assemble_then_finalize_matches_finalize_be() {
+    assemble_then_finalize_matches_finalize::<Be>();
+}
+
+/// One artifact, many images: the resolved instruction list is a single constant,
+/// and only the relocation moves as the region it names lands at a new address.
+#[test]
+fn one_artifact_lays_out_against_many_images() {
+    let cfg = pushes(Region::Scratch);
+    let artifact = assemble::<Le>(&cfg).expect("assembles");
+
+    let base = |input| {
+        let layout = Layout::new(Sizes {
+            input,
+            scratch: 8,
+            stack: 64,
+        })
+        .expect("fits");
+
+        let program = artifact.finalize(&layout).expect("finalizes");
+        match first::<Le>(program.code()) {
+            Instr::Push32(op) => op.imm,
+            other => panic!("expected a base push, got {other:?}"),
+        }
+    };
+
+    assert_ne!(base(0), base(16), "scratch moves with whatever precedes it");
+
+    // And the thing that was laid out twice was one resolution, its placeholder
+    // push identical no matter which image it is later given.
+    let resolved = resolve(&cfg).expect("resolves");
+    assert_eq!(resolved.code(), resolve(&cfg).expect("resolves").code());
+    assert!(matches!(
+        resolved.code().first(),
+        Some(Instr::Push32(op)) if op.imm == 0
+    ));
 }

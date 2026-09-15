@@ -55,6 +55,36 @@ impl TypeLayout {
         }
     }
 
+    /// The byte size of the field a dotted path resolves to, or `None` if a name
+    /// is unknown or a non-final name is a scalar.
+    ///
+    /// `const` so the linker can pick a load's width at compile time.
+    pub const fn size_of(&self, path: &[&str]) -> Option<u32> {
+        let (&last, parents) = match path.split_last() {
+            Some(split) => split,
+            None => return None,
+        };
+
+        let mut here = self;
+        let mut rest = parents;
+        while let Some((&name, tail)) = rest.split_first() {
+            let field = match here.field(name) {
+                Some(field) => field,
+                None => return None,
+            };
+            here = match field.nested {
+                Some(inner) => inner,
+                None => return None,
+            };
+            rest = tail;
+        }
+
+        match here.field(last) {
+            Some(field) => Some(field.size),
+            None => None,
+        }
+    }
+
     const fn field(&self, name: &str) -> Option<Field> {
         let mut rest = self.fields;
         while let Some((field, tail)) = rest.split_first() {
@@ -119,8 +149,7 @@ impl Field {
 /// so a derive can size, place and marshal every field the same way rather than
 /// telling a scalar from a nested struct by its tokens.
 pub trait VmLayout: Sized {
-    /// The canonical flat layout: the single source of truth for offsets. Empty
-    /// for a scalar.
+    /// The flat layout every offset is read from. Empty for a scalar.
     const LAYOUT: &'static TypeLayout;
 
     /// Total bytes occupied in the image.

@@ -1,0 +1,5 @@
+error: a field must be typed as a scalar the machine can hold
+  --> tests/ui/u16_field.rs:10:19
+   |
+10 |     f.len.typed::<u16>() == 0
+   |                   ^^^

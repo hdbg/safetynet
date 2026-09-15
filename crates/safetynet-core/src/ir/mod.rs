@@ -21,14 +21,14 @@ mod validate;
 
 pub use builder::{BlockBody, BuildError, Builder};
 pub use finalize::{
-    Artifact, BaseReloc, FieldReloc, NotFinal, Reloc, Resolved, TagReloc, assemble, assemble_with,
-    finalize, finalize_with, resolve,
+    Artifact, BaseReloc, FieldReloc, LoadReloc, NotFinal, Reloc, Resolved, TagReloc, assemble,
+    assemble_with, finalize, finalize_with, resolve,
 };
 pub use frame::{Cell, CellId, Frame};
 pub use validate::{Invalid, Limits, Where, validate, validate_with};
 
-use crate::isa::{Lds64, Push32, Sts64};
-use crate::{Instr, Op, Region};
+use crate::isa::{Ld64, Lds64, Push32, Sts64};
+use crate::{Instr, Op, Region, Width};
 
 #[cfg(test)]
 mod tests;
@@ -75,6 +75,10 @@ pub enum Item {
     /// Push an enum variant's discriminant word, resolved once the type is
     /// known. The `u32` names the hole, like [`Item::Field`].
     Tag(u32),
+    /// Pop an address and push the field there, at a width resolved once the
+    /// aggregate's layout is known. The `u32` names the hole, like
+    /// [`Item::Field`], which supplies the offset this load reads from.
+    LoadField(u32),
 }
 
 impl Item {
@@ -93,6 +97,7 @@ impl Item {
             Self::Load(_) => Lds64 { disp: 0 }.sp_delta(),
             Self::Store(_) => Sts64 { disp: 0 }.sp_delta(),
             Self::Base(_) | Self::Field(_) | Self::Tag(_) => Push32 { imm: 0 }.sp_delta(),
+            Self::LoadField(_) => Ld64.sp_delta(),
         }
     }
 }
@@ -189,7 +194,22 @@ impl Block {
 }
 
 /// A control-flow graph: one function's worth of blocks over one frame.
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// Its [`Debug`](core::fmt::Debug) form is an assembly-like listing:
+///
+/// ```
+/// use safetynet_core::ir::{Cfg, Frame, Terminator};
+/// use safetynet_core::isa::Push8;
+///
+/// let mut builder = Cfg::builder(Frame::new());
+/// let entry = builder.block(0);
+/// builder.at(entry).expect("open").instr(Push8 { imm: 7 });
+/// builder.seal(entry, Terminator::Halt).expect("seals");
+/// let cfg = builder.build(entry).expect("builds");
+///
+/// assert_eq!(format!("{cfg:?}"), "b0:\n    push8 7\n    halt\n");
+/// ```
+#[derive(Clone, PartialEq, Eq)]
 pub struct Cfg {
     entry: BlockId,
     blocks: Vec<Block>,
@@ -220,5 +240,108 @@ impl Cfg {
     /// The block `id` names.
     pub fn block(&self, id: BlockId) -> Option<&Block> {
         self.blocks.get(id.index())
+    }
+}
+
+impl core::fmt::Debug for Cfg {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        let cells = self.frame.cells();
+        if !cells.is_empty() {
+            f.write_str(".frame {")?;
+            for (index, cell) in cells.iter().enumerate() {
+                let separator = if index == 0 { " " } else { ", " };
+                write!(f, "{separator}c{index}: {}", width_name(cell.width()))?;
+            }
+            f.write_str(" }\n")?;
+        }
+
+        // Block zero is where execution starts unless something says otherwise,
+        // so the common case spells nothing.
+        if self.entry.index() != 0 {
+            writeln!(f, ".entry b{}", self.entry.index())?;
+        }
+
+        for (position, block) in self.blocks.iter().enumerate() {
+            let next = self.blocks.get(position + 1).map(Block::id);
+
+            writeln!(f, "b{}:", block.id().index())?;
+            for item in block.code() {
+                f.write_str(INDENT)?;
+                write_item(f, *item)?;
+                f.write_str("\n")?;
+            }
+
+            f.write_str(INDENT)?;
+            write_term(f, block.term(), next)?;
+            f.write_str("\n")?;
+        }
+
+        Ok(())
+    }
+}
+
+/// Indent for everything inside a block in the `Debug` listing.
+const INDENT: &str = "    ";
+
+fn write_item(f: &mut core::fmt::Formatter<'_>, item: Item) -> core::fmt::Result {
+    match item {
+        Item::Instr(instr) => write!(f, "{instr}"),
+        Item::Load(cell) => write!(f, "$load c{}", cell.index()),
+        Item::Store(cell) => write!(f, "$store c{}", cell.index()),
+        Item::Base(region) => write!(f, "$push .{}", region_name(region)),
+        // The type and path live outside the graph, so only the hole shows.
+        Item::Field(hole) => write!(f, "$field #{hole}"),
+        Item::Tag(hole) => write!(f, "$tag #{hole}"),
+        Item::LoadField(hole) => write!(f, "$loadfield #{hole}"),
+    }
+}
+
+fn write_term(
+    f: &mut core::fmt::Formatter<'_>,
+    term: &Terminator,
+    next: Option<BlockId>,
+) -> core::fmt::Result {
+    match term {
+        Terminator::Halt => f.write_str("halt"),
+        Terminator::Jmp(target) => write!(f, "jmp b{}", target.index()),
+
+        // A conditional spells the arm that is not reached by falling through.
+        // `then` is the non-zero arm, so falling into `els` leaves `jnz`.
+        Terminator::Br { then, els } if next == Some(*els) => {
+            write!(f, "jnz b{}", then.index())
+        }
+        Terminator::Br { then, els } if next == Some(*then) => {
+            write!(f, "jz b{}", els.index())
+        }
+        Terminator::Br { then, els } => {
+            write!(f, "br b{}, b{}", then.index(), els.index())
+        }
+
+        Terminator::Switch { arms, default } => {
+            f.write_str("switch [")?;
+            for (index, arm) in arms.iter().enumerate() {
+                let separator = if index == 0 { "" } else { ", " };
+                write!(f, "{separator}b{}", arm.index())?;
+            }
+            write!(f, "] default b{}", default.index())
+        }
+    }
+}
+
+/// How a width is spelled in a `.frame` line.
+const fn width_name(width: Width) -> &'static str {
+    match width {
+        Width::U8 => "u8",
+        Width::U32 => "u32",
+        Width::U64 => "u64",
+    }
+}
+
+/// How a region is spelled after `$push .`.
+const fn region_name(region: Region) -> &'static str {
+    match region {
+        Region::Input => "input",
+        Region::Scratch => "scratch",
+        Region::Stack => "stack",
     }
 }

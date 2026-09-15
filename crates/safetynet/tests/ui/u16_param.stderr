@@ -1,0 +1,5 @@
+error: a parameter must be a scalar the machine can hold
+ --> tests/ui/u16_param.rs:4:16
+  |
+4 | fn widened(_x: u16) -> u32 {
+  |                ^^^

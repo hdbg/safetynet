@@ -134,8 +134,7 @@ fn division_by_zero_traps() {
 }
 
 /// `i64::MIN / -1` is the one signed division with no representable answer.
-/// Left to wrap it would quietly produce `i64::MIN`, which is the kind of
-/// disagreement a differential harness finds months later.
+/// Left to wrap it would quietly produce `i64::MIN` where Rust panics.
 #[test]
 fn the_unrepresentable_signed_division_traps() {
     let program = [

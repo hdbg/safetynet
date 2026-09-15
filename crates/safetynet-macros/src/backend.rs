@@ -1,38 +1,52 @@
-//! The expansion: a resolved graph encoded to the bytes and relocations that
-//! rebuild an [`Artifact`] at the call site.
+//! The backend: a resolved graph becomes the tokens that rebuild it.
 //!
-//! The block-resolving work — validation, layout, branch backpatching — is the
-//! same whatever order or image the program later runs against, so it happens
-//! here, at expansion, and what the macro emits is finished bytecode. The one
-//! address a graph cannot settle on its own, a region's base, is left to a
-//! relocation the host runs when it chooses a layout.
+//! The lowerer resolves to a graph; what comes out the other side is the
+//! encoded instructions, the region-base relocations the host fills in, and
+//! the field holes the linker bakes at compile time.
 
 use proc_macro2::{Literal, TokenStream};
 use quote::quote;
-use safetynet_core::encoding::{Packed, encode, push32_immediate, push64_immediate};
-use safetynet_core::ir::resolve;
-use safetynet_core::{Be, Le, Region};
+use safetynet_core::encoding::{Packed, encode, push32_immediate};
+use safetynet_core::ir::Resolved;
+use safetynet_core::isa::{Ld8, Ld32, Ld64};
+use safetynet_core::{Be, Instr, Le, Region};
 use syn::Path;
 use syn::spanned::Spanned;
 
-use super::Lowered;
+/// A field reference the call site resolves: its type and the path into it.
+#[derive(Debug)]
+pub(crate) struct FieldRef {
+    pub(crate) ty: syn::Type,
+    pub(crate) path: Vec<syn::Ident>,
+}
 
-/// The two byte orders the macro can encode against at expansion.
+/// The two byte orders the backend can encode against at expansion.
 #[derive(Clone, Copy)]
 enum Order {
     Le,
     Be,
 }
 
-/// Encodes a resolved graph and writes the call that rebuilds it as an
+/// Encodes a resolved graph and writes the expression that rebuilds it as an
 /// `Artifact` in the given order.
-pub(crate) fn emit(order: &Path, lowered: &Lowered) -> syn::Result<TokenStream> {
+///
+/// The block-resolving work is already done; what is left is order-dependent —
+/// the encoded bytes, and where each push's immediate lands so a hole can be
+/// patched into it.
+pub(crate) fn emit_artifact(
+    order: &Path,
+    resolved: &Resolved,
+    field_refs: &[FieldRef],
+) -> syn::Result<TokenStream> {
     let which = concrete_order(order)?;
 
-    // The layout- and order-independent work, run host-side. Anything the
-    // resolver rejects surfaces here, where the invocation still has a span.
-    let resolved = resolve(&lowered.cfg)
-        .map_err(|error| syn::Error::new(order.span(), format!("cannot assemble: {error}")))?;
+    // The IR can hold a tag reference, but nothing here produces one.
+    if !resolved.tag_relocs().is_empty() {
+        return Err(syn::Error::new(
+            order.span(),
+            "a tag reference has nothing to resolve it",
+        ));
+    }
 
     // Encode in the chosen order, recording where each instruction begins so a
     // relocation can name the byte its push starts at. A region base resolves to
@@ -70,21 +84,12 @@ pub(crate) fn emit(order: &Path, lowered: &Lowered) -> syn::Result<TokenStream> 
 
     // Where each push's immediate lands and how it is ordered, probed from the
     // very encoder that wrote the bytes above — the linker patches into that
-    // rather than assuming a shape. Field offsets ride a push32, discriminants a
-    // push64.
-    let immediate = |wide: bool| match (which, wide) {
-        (Order::Le, false) => push32_immediate(&Packed::<Le>::new()),
-        (Order::Be, false) => push32_immediate(&Packed::<Be>::new()),
-        (Order::Le, true) => push64_immediate(&Packed::<Le>::new()),
-        (Order::Be, true) => push64_immediate(&Packed::<Be>::new()),
+    // rather than assuming a shape. Field offsets ride a push32.
+    let immediate = || match which {
+        Order::Le => push32_immediate(&Packed::<Le>::new()),
+        Order::Be => push32_immediate(&Packed::<Be>::new()),
     };
-    let missing = |wide: bool| {
-        let push = if wide { "push64" } else { "push32" };
-        syn::Error::new(
-            order.span(),
-            format!("the encoder has no {push} immediate to patch"),
-        )
-    };
+    let missing = || syn::Error::new(order.span(), "the encoder has no push32 immediate to patch");
     let at_of = |imm: &safetynet_core::Immediate, index: usize| {
         Literal::usize_suffixed(offsets.get(index).copied().unwrap_or_default() + imm.at)
     };
@@ -92,11 +97,11 @@ pub(crate) fn emit(order: &Path, lowered: &Lowered) -> syn::Result<TokenStream> 
     let mut patches = Vec::new();
 
     if !resolved.field_relocs().is_empty() {
-        let imm = immediate(false).ok_or_else(|| missing(false))?;
+        let imm = immediate().ok_or_else(missing)?;
         let (width, big_endian) = (Literal::usize_suffixed(imm.width), imm.big_endian);
         for reloc in resolved.field_relocs() {
             let at = at_of(&imm, reloc.index);
-            let field = lowered.field_refs.get(reloc.hole as usize).ok_or_else(|| {
+            let field = field_refs.get(reloc.hole as usize).ok_or_else(|| {
                 syn::Error::new(
                     order.span(),
                     "a field reference went missing while assembling",
@@ -121,24 +126,34 @@ pub(crate) fn emit(order: &Path, lowered: &Lowered) -> syn::Result<TokenStream> 
         }
     }
 
-    if !resolved.tag_relocs().is_empty() {
-        let imm = immediate(true).ok_or_else(|| missing(true))?;
-        let (width, big_endian) = (Literal::usize_suffixed(imm.width), imm.big_endian);
-        for reloc in resolved.tag_relocs() {
-            let at = at_of(&imm, reloc.index);
-            let tag = lowered.tag_refs.get(reloc.hole as usize).ok_or_else(|| {
+    // A field load is one opcode byte at the instruction's own offset; the
+    // linker picks `ld8`/`ld32`/`ld64` from the field's size, so the three
+    // opcode bytes are probed from the encoder and ride along.
+    if !resolved.load_relocs().is_empty() {
+        let [ld8, ld32, ld64] = load_opcodes(which);
+        for reloc in resolved.load_relocs() {
+            let at = Literal::usize_suffixed(offsets.get(reloc.index).copied().unwrap_or_default());
+            let field = field_refs.get(reloc.hole as usize).ok_or_else(|| {
                 syn::Error::new(
                     order.span(),
-                    "a tag reference went missing while assembling",
+                    "a field load reference went missing while assembling",
                 )
             })?;
-            let path = &tag.path;
+            let ty = &field.ty;
+            let names = field
+                .path
+                .iter()
+                .map(|name| Literal::string(&name.to_string()));
             patches.push(quote! {
                 ::safetynet::Patch {
                     at: #at,
-                    width: #width,
-                    big_endian: #big_endian,
-                    hole: ::safetynet::Hole::Word(#path as ::safetynet::Word),
+                    width: 1,
+                    big_endian: false,
+                    hole: ::safetynet::Hole::Load {
+                        layout: <#ty as ::safetynet::VmLayout>::LAYOUT,
+                        path: &[#(#names),*],
+                        opcodes: [#ld8, #ld32, #ld64],
+                    },
                 }
             });
         }
@@ -159,6 +174,20 @@ pub(crate) fn emit(order: &Path, lowered: &Lowered) -> syn::Result<TokenStream> 
     })
 }
 
+/// The `ld8`, `ld32` and `ld64` opcode bytes, so the linker can write the one a
+/// field's size calls for without a second copy of the wire format.
+fn load_opcodes(which: Order) -> [u8; 3] {
+    let byte = |instr: Instr| {
+        let mut bytes = Vec::new();
+        let _ = match which {
+            Order::Le => encode::<Le>(instr, &mut bytes),
+            Order::Be => encode::<Be>(instr, &mut bytes),
+        };
+        bytes.first().copied().unwrap_or_default()
+    };
+    [byte(Ld8.into()), byte(Ld32.into()), byte(Ld64.into())]
+}
+
 /// Reads the concrete order off the path's last segment.
 ///
 /// The order is emitted verbatim into the `Artifact<_>` type, so an alias that
@@ -171,7 +200,7 @@ fn concrete_order(order: &Path) -> syn::Result<Order> {
         Some(segment) if segment.ident == "Be" => Ok(Order::Be),
         _ => Err(syn::Error::new(
             order.span(),
-            "`asm!` needs a concrete byte order, `Le` or `Be`",
+            "a concrete byte order, `Le` or `Be`, is needed to encode",
         )),
     }
 }

@@ -75,6 +75,8 @@ pub struct Resolved {
     field_relocs: Vec<FieldReloc>,
     /// The discriminant pushes whose immediate the type still owes.
     tag_relocs: Vec<TagReloc>,
+    /// The field loads whose width a layout still owes.
+    load_relocs: Vec<LoadReloc>,
     /// The branches and where each block starts, kept so an encoder that changes
     /// instruction sizes can recompute the offsets against its own measurements.
     patches: Vec<Patch>,
@@ -107,6 +109,11 @@ impl Resolved {
     pub fn tag_relocs(&self) -> &[TagReloc] {
         &self.tag_relocs
     }
+
+    /// The field-load relocations, each naming a load and its hole.
+    pub fn load_relocs(&self) -> &[LoadReloc] {
+        &self.load_relocs
+    }
 }
 
 /// A region-base push whose immediate is filled in once a layout is chosen.
@@ -136,6 +143,15 @@ pub struct TagReloc {
     pub hole: u32,
 }
 
+/// A field load whose opcode width is filled in from an aggregate's layout.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LoadReloc {
+    /// Index of the load in [`Resolved::code`].
+    pub index: usize,
+    /// Names the hole; the field it reads lives outside the graph.
+    pub hole: u32,
+}
+
 /// Validates a graph and resolves it to instructions, without a byte order.
 ///
 /// Everything but a region's base is decided here, so the result is the same
@@ -151,6 +167,7 @@ pub fn resolve(cfg: &Cfg) -> Result<Resolved, NotFinal> {
         relocs,
         field_relocs,
         tag_relocs,
+        load_relocs,
     } = emit(cfg, &order)?;
 
     // Branch offsets, computed against the standard packed sizes. Order does not
@@ -166,6 +183,7 @@ pub fn resolve(cfg: &Cfg) -> Result<Resolved, NotFinal> {
         relocs,
         field_relocs,
         tag_relocs,
+        load_relocs,
         patches,
         starts,
     })
@@ -190,7 +208,10 @@ pub fn assemble_with<E: Encoder + Clone + 'static>(
 
     // Field offsets and discriminants need a type, which this path does not
     // carry; only an assembler that knows the type can resolve them.
-    if !resolved.field_relocs.is_empty() || !resolved.tag_relocs.is_empty() {
+    if !resolved.field_relocs.is_empty()
+        || !resolved.tag_relocs.is_empty()
+        || !resolved.load_relocs.is_empty()
+    {
         return Err(NotFinal::FieldWithoutLayout);
     }
 
@@ -424,6 +445,8 @@ struct Emitted {
     field_relocs: Vec<FieldReloc>,
     /// The discriminant holes left as placeholders.
     tag_relocs: Vec<TagReloc>,
+    /// The field loads left as placeholders.
+    load_relocs: Vec<LoadReloc>,
 }
 
 /// A branch whose offset is not known until every instruction has been measured.
@@ -464,6 +487,7 @@ fn emit(cfg: &Cfg, order: &[BlockId]) -> Result<Emitted, NotFinal> {
     let mut relocs = Vec::new();
     let mut field_relocs = Vec::new();
     let mut tag_relocs = Vec::new();
+    let mut load_relocs = Vec::new();
     let mut starts = vec![0; cfg.blocks().len()];
 
     // The prologue, reserving the frame the whole graph shares. There is no
@@ -499,6 +523,10 @@ fn emit(cfg: &Cfg, order: &[BlockId]) -> Result<Emitted, NotFinal> {
                     hole,
                 }),
                 Item::Tag(hole) => tag_relocs.push(TagReloc {
+                    index: code.len(),
+                    hole,
+                }),
+                Item::LoadField(hole) => load_relocs.push(LoadReloc {
                     index: code.len(),
                     hole,
                 }),
@@ -550,6 +578,7 @@ fn emit(cfg: &Cfg, order: &[BlockId]) -> Result<Emitted, NotFinal> {
         relocs,
         field_relocs,
         tag_relocs,
+        load_relocs,
     })
 }
 
@@ -610,6 +639,8 @@ fn materialize(frame: &Frame, item: Item, depth: u32, at: Where) -> Result<Instr
         Item::Base(_) | Item::Field(_) => return Ok(Push32 { imm: 0 }.into()),
         // A discriminant is a whole word, so it holds a wider place.
         Item::Tag(_) => return Ok(Push64 { imm: 0 }.into()),
+        // The width arrives at link; the narrowest load holds its place.
+        Item::LoadField(_) => return Ok(crate::isa::Ld8.into()),
         Item::Load(cell) => (cell, false),
         Item::Store(cell) => (cell, true),
     };

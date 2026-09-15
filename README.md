@@ -44,6 +44,40 @@ compile time with an error pointing at the offending code.
 - `Result` and `?`, with a single error type (WIP)
 - Function calls (WIP)
 
+Struct fields carry one extra rule: a field's first use names its type with
+[`Typed::typed`], and later uses may go bare. Naming two different types for
+one field is a compile error.
+
+```rust
+use safetynet::Typed;
+
+#[safetynet]
+fn check(pkt: Packet) -> u32 {
+    if pkt.seq.typed::<u32>() > 100 {   // first use names the type
+        return 100;
+    }
+    pkt.seq                             // known from here on
+}
+```
+
+The macro sees only the annotated function's tokens — not the struct
+definition — so it cannot resolve a field's type on its own; `.typed::<u32>()`
+supplies it. The call is an identity function bounded so it compiles only when
+the field is *exactly* the named type: name the wrong one and rustc rejects
+the hidden reference copy of your function, pointing at the call. A field used
+before its type is named is refused with an error that spells out the fix.
+
+## Workspace
+
+```
+crates/
+  safetynet-core     opcode table, IR types, traits, byte-order policy,
+                     layout descriptors, interpreter
+  safetynet-macros   proc-macros: #[safetynet], #[derive(VmLayout)]
+  safetynet          the façade crate downstream code depends on
+  safetynet-demo     a sample cipher lowered from Rust with #[safetynet]
+docs/spec.md         the full specification and design review
+```
 **Not supported**
 
 - Recursion

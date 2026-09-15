@@ -1,11 +1,10 @@
-//! Shared logic for safetynet: the byte-order policy, and in time the opcode
-//! table, IR, assembler and interpreter.
+//! Shared logic for safetynet: the byte-order policy, the opcode table, the IR
+//! and the interpreter.
 //!
 //! Proc-macro crates may only export macros, so everything reusable lives here
 //! and both `safetynet-macros` and the runtime depend on it. That is what keeps
 //! the encoder and the decoder from drifting: they are declared together, once.
 
-pub mod asm;
 pub mod byte_order;
 pub mod encoding;
 pub mod image;
@@ -27,7 +26,7 @@ pub use isa::{FrameSize, Instr, Op};
 pub use link::{Hole, Patch, link};
 pub use marshal::{Field, TypeLayout, VmLayout};
 pub use program::Program;
-pub use value::VmValue;
+pub use value::{Same, Typed, VmValue};
 
 /// Implementation detail of the derives; not a stable API.
 #[doc(hidden)]

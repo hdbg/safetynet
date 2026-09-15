@@ -1,0 +1,14 @@
+error[E0277]: the trait bound `u32: Same<u64>` is not satisfied
+  --> tests/ui/wrong_field_type.rs:10:11
+   |
+10 |     p.seq.typed::<u64>()
+   |           ^^^^^ the trait `Same<u64>` is not implemented for `u32`
+   |
+note: required by a bound in `typed`
+  --> $WORKSPACE/crates/safetynet-core/src/value.rs
+   |
+   |     fn typed<U>(self) -> U
+   |        ----- required by a bound in this associated function
+   |     where
+   |         Self: Same<U>,
+   |               ^^^^^^^ required by this bound in `Typed::typed`

@@ -25,6 +25,11 @@ impl Width {
         }
     }
 
+    /// The width in bits: 8, 32 or 64.
+    pub const fn bits(self) -> u16 {
+        self.bytes() * 8
+    }
+
     /// The narrowest width that holds `bytes`, if any does.
     ///
     /// There is no two-byte access, so a `u16` local occupies a four-byte cell.
