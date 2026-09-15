@@ -43,6 +43,29 @@ data-carrying enums, `Result` and `?` (single error type), and module-scoped
 inlined calls. No recursion, heap, generics, traits, closures, or floats in guest
 code. Out-of-subset constructs are rejected at compile time with a pointing error.
 
+Struct fields carry one extra rule: a field's first use names its type with
+[`Typed::typed`], and later uses may go bare. Naming two different types for
+one field is a compile error.
+
+```rust
+use safetynet::Typed;
+
+#[safetynet]
+fn check(pkt: Packet) -> u32 {
+    if pkt.seq.typed::<u32>() > 100 {   // first use names the type
+        return 100;
+    }
+    pkt.seq                             // known from here on
+}
+```
+
+The macro sees only the annotated function's tokens — not the struct
+definition — so it cannot resolve a field's type on its own; `.typed::<u32>()`
+supplies it. The call is an identity function bounded so it compiles only when
+the field is *exactly* the named type: name the wrong one and rustc rejects
+the hidden reference copy of your function, pointing at the call. A field used
+before its type is named is refused with an error that spells out the fix.
+
 ## Workspace
 
 ```

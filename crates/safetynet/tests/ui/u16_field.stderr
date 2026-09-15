@@ -1,5 +1,5 @@
-error: a field must be a scalar the machine can load
-  --> tests/ui/u16_field.rs:10:5
+error: a field must be typed as a scalar the machine can hold
+  --> tests/ui/u16_field.rs:10:19
    |
-10 |     f.len == 0
-   |     ^^^^^
+10 |     f.len.typed::<u16>() == 0
+   |                   ^^^

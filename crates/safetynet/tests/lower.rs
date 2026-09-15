@@ -369,7 +369,7 @@ fn a_for_loop_continues_to_the_increment() {
     assert_eq!(sum_odds_below(6), 9);
 }
 
-use safetynet::VmLayout;
+use safetynet::{Typed, VmLayout};
 
 #[derive(Clone, Copy, VmLayout)]
 struct Packet {
@@ -393,32 +393,33 @@ struct Message {
 
 #[safetynet]
 fn read_seq(p: Packet) -> u32 {
-    p.seq
+    p.seq.typed::<u32>()
 }
 
 #[safetynet]
 fn read_flags(p: Packet) -> u8 {
-    p.flags
+    p.flags.typed::<u8>()
 }
 
 #[safetynet]
 fn read_tag(p: Packet) -> u64 {
-    p.tag
+    p.tag.typed::<u64>()
 }
 
 #[safetynet]
 fn sum_fields(p: Packet) -> u32 {
-    p.seq + p.len
+    p.seq.typed::<u32>() + p.len.typed::<u32>()
 }
 
 #[safetynet]
 fn flag_is_set(p: Packet) -> bool {
-    p.flags & 1 == 1
+    p.flags.typed::<u8>() & 1 == 1
 }
 
 #[safetynet]
 fn clamp_seq(p: Packet) -> u32 {
-    if p.seq > 100 {
+    // The first use asserts the type; the second may go bare.
+    if p.seq.typed::<u32>() > 100 {
         return 100;
     }
     p.seq
@@ -426,7 +427,7 @@ fn clamp_seq(p: Packet) -> u32 {
 
 #[safetynet]
 fn nested_seq(m: Message) -> u32 {
-    m.header.seq
+    m.header.seq.typed::<u32>()
 }
 
 fn sample() -> Packet {

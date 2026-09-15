@@ -54,6 +54,35 @@ impl VmValue for bool {
     }
 }
 
+/// Holds only when `Self` is exactly `U` — the bound behind [`Typed::typed`].
+pub trait Same<U> {
+    /// Returns `self`, unchanged.
+    fn same(self) -> U;
+}
+
+impl<T> Same<T> for T {
+    fn same(self) -> T {
+        self
+    }
+}
+
+/// Names a value's exact type in guest code: `pkt.seq.typed::<u32>()`.
+///
+/// `#[safetynet]` cannot see the aggregate's definition, so a field's first
+/// use names its type this way. The kept reference copy compiles only when
+/// the named type is exactly the field's own, so the name cannot lie
+pub trait Typed: Sized {
+    /// Returns `self` unchanged
+    fn typed<U>(self) -> U
+    where
+        Self: Same<U>,
+    {
+        self.same()
+    }
+}
+
+impl<T> Typed for T {}
+
 #[cfg(test)]
 mod tests {
     use super::*;

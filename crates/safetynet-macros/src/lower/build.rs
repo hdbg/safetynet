@@ -159,6 +159,7 @@ pub(crate) fn lower(func: &syn::ItemFn) -> syn::Result<Lowered> {
         bindings,
         loops: Vec::new(),
         field_refs: Vec::new(),
+        field_types: HashMap::new(),
         aggregate: aggregate.clone(),
         cur: entry,
         ret,
@@ -196,6 +197,8 @@ struct Lowerer {
     loops: Vec<Loop>,
     /// Field references, appended as field accesses are lowered.
     field_refs: Vec<FieldRef>,
+    /// Each field's scalar and named type spelling, keyed by its dotted path.
+    field_types: HashMap<String, (Scalar, String)>,
     /// The single aggregate parameter's name and type, if the function has one.
     aggregate: Option<(String, syn::Type)>,
     /// The block instructions are being appended to.
@@ -732,17 +735,82 @@ impl Lowerer {
             syn::Expr::Paren(paren) => self.lower_expr(&paren.expr, expected, depth),
             syn::Expr::Unary(unary) => self.lower_unary(unary, expected, depth),
             syn::Expr::Binary(binary) => self.lower_binary(binary, expected, depth),
-            syn::Expr::Field(field) => self.lower_field_read(field),
+            syn::Expr::MethodCall(call) if call.method == "typed" => {
+                self.lower_field_typed(call)
+            }
+            syn::Expr::Field(field) => self.lower_field_known(field),
             other => Err(err(other, "this expression is not supported yet")),
         }
     }
 
-    /// Reads a field of the aggregate parameter.
+    /// Lowers `p.x.typed::<u64>()`: a field read whose first use names the
+    /// field's type.
     ///
-    /// The offset and load width are both a field's, and both are resolved from
-    /// the aggregate's layout at link time, so the value returns as an unsigned
-    /// word — its own type is not knowable here.
-    fn lower_field_read(&mut self, field: &syn::ExprField) -> syn::Result<Scalar> {
+    /// The field's own type is not visible here, so its first use names one;
+    /// later uses may go bare. The reference copy calls the real
+    /// `Typed::typed`, which compiles only when the named type is exactly the
+    /// field's own.
+    fn lower_field_typed(&mut self, call: &syn::ExprMethodCall) -> syn::Result<Scalar> {
+        let mut inner: &syn::Expr = &call.receiver;
+        while let syn::Expr::Paren(paren) = inner {
+            inner = &paren.expr;
+        }
+        let syn::Expr::Field(field) = inner else {
+            return Err(err(call, "only a field names its type with `.typed()`"));
+        };
+        if !call.args.is_empty() {
+            return Err(err(&call.args, "`.typed()` takes no arguments"));
+        }
+        let ty = typed_argument(call)
+            .ok_or_else(|| err(call, "`.typed()` needs the type: `.typed::<u32>()`"))?;
+        let scalar = Scalar::of(ty).ok_or_else(|| {
+            err(ty, "a field must be typed as a scalar the machine can hold")
+        })?;
+
+        let (_, path) = field_path(field)?;
+        let key = field_key(&path);
+        let spelled = ty.to_token_stream().to_string();
+        match self.field_types.get(&key) {
+            Some((_, prior)) if *prior != spelled => {
+                return Err(err(
+                    call,
+                    &format!("this field is already typed as `{prior}`"),
+                ));
+            }
+            Some(_) => {}
+            None => {
+                self.field_types.insert(key, (scalar, spelled));
+            }
+        }
+        self.lower_field_read(field, scalar)
+    }
+
+    /// Lowers a bare field read, legal once its type has been named.
+    fn lower_field_known(&mut self, field: &syn::ExprField) -> syn::Result<Scalar> {
+        let (root, path) = field_path(field)?;
+        let scalar = self
+            .field_types
+            .get(&field_key(&path))
+            .map(|(scalar, _)| *scalar)
+            .ok_or_else(|| {
+                let access = format!("{root}.{}", field_key(&path));
+                err(
+                    field,
+                    &format!(
+                        "the field's type cannot be resolved\n\
+                         help: name it at the field's first use: `{access}.typed::<u32>()` \
+                         (with the field's own type), importing `safetynet::Typed`"
+                    ),
+                )
+            })?;
+        self.lower_field_read(field, scalar)
+    }
+
+    /// Reads a field of the aggregate parameter as the asserted `scalar`.
+    ///
+    /// The offset and load width are resolved from the aggregate's layout at
+    /// link time.
+    fn lower_field_read(&mut self, field: &syn::ExprField, scalar: Scalar) -> syn::Result<Scalar> {
         let (root, path) = field_path(field)?;
         let ty = match &self.aggregate {
             Some((name, ty)) if *name == root => ty.clone(),
@@ -757,10 +825,7 @@ impl Lowerer {
         self.body()?.field(hole);
         self.push_instr(Add)?;
         self.body()?.load_field(hole);
-        Ok(Scalar {
-            width: Width::U64,
-            signed: false,
-        })
+        Ok(scalar)
     }
 
     /// Pushes a literal; its type is the context's, or `i32` with nothing to go
@@ -935,11 +1000,15 @@ impl Lowerer {
                 lit: syn::Lit::Bool(_),
                 ..
             }) => Some(Scalar::BOOL),
-            // A field's own type is not known here; it reads as an unsigned word.
-            syn::Expr::Field(_) => Some(Scalar {
-                width: Width::U64,
-                signed: false,
-            }),
+            syn::Expr::MethodCall(call) if call.method == "typed" => {
+                Scalar::of(typed_argument(call)?)
+            }
+            syn::Expr::Field(field) => {
+                let (_, path) = field_path(field).ok()?;
+                self.field_types
+                    .get(&field_key(&path))
+                    .map(|(scalar, _)| *scalar)
+            }
             syn::Expr::Binary(binary) if logical(&binary.op).is_some() => Some(Scalar::BOOL),
             syn::Expr::Binary(binary) => match plain(&binary.op) {
                 Some(op) if op.is_comparison() => Some(Scalar::BOOL),
@@ -1110,6 +1179,7 @@ fn is_value_expr(expr: &syn::Expr) -> bool {
             | syn::Expr::Unary(_)
             | syn::Expr::Binary(_)
             | syn::Expr::Field(_)
+            | syn::Expr::MethodCall(_)
             | syn::Expr::Block(_)
     )
 }
@@ -1121,6 +1191,23 @@ fn signed(ty: Scalar, when_signed: Instr, when_unsigned: Instr) -> Instr {
     } else {
         when_unsigned
     }
+}
+
+/// The `T` of `.typed::<T>()`, when the turbofish names exactly one type.
+fn typed_argument(call: &syn::ExprMethodCall) -> Option<&syn::Type> {
+    let turbofish = call.turbofish.as_ref()?;
+    match turbofish.args.first() {
+        Some(syn::GenericArgument::Type(ty)) if turbofish.args.len() == 1 => Some(ty),
+        _ => None,
+    }
+}
+
+/// A field path's map key: its dotted spelling.
+fn field_key(path: &[syn::Ident]) -> String {
+    path.iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>()
+        .join(".")
 }
 
 /// The root name and dotted path of a field access, `p.a.b` → `(p, [a, b])`.

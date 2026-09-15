@@ -3,7 +3,7 @@
 //! twin with proptest.
 
 use proptest::prelude::*;
-use safetynet::{VmLayout, safetynet};
+use safetynet::{Typed, VmLayout, safetynet};
 
 /// One block to transform, with the key material it is keyed by.
 #[derive(Clone, Copy, VmLayout)]
@@ -15,11 +15,11 @@ struct Block {
 
 #[safetynet]
 fn encrypt(b: Block) -> u64 {
-    let mut n: u64 = b.rounds;
+    let mut n: u64 = b.rounds.typed::<u64>();
     if n == 0 || n > 32 {
         n = 16;
     }
-    let mut l: u64 = (b.value >> 32) & 0xFFFFFFFF;
+    let mut l: u64 = (b.value.typed::<u64>() >> 32) & 0xFFFFFFFF;
     let mut r: u64 = b.value & 0xFFFFFFFF;
     let mut i: u64 = 0;
     loop {
@@ -27,7 +27,7 @@ fn encrypt(b: Block) -> u64 {
             break;
         }
         // The round key: a small mix of the seed and the round number.
-        let mut k: u64 = b.seed ^ (i * 0x9E3779B97F4A7C15);
+        let mut k: u64 = b.seed.typed::<u64>() ^ (i * 0x9E3779B97F4A7C15);
         let mut j: u64 = 0;
         while j < 5 {
             if j == 2 {
@@ -63,16 +63,16 @@ fn encrypt(b: Block) -> u64 {
 
 #[safetynet]
 fn decrypt(b: Block) -> u64 {
-    let mut n: u64 = b.rounds;
+    let mut n: u64 = b.rounds.typed::<u64>();
     if n == 0 || n > 32 {
         n = 16;
     }
-    let mut l: u64 = (b.value >> 32) & 0xFFFFFFFF;
+    let mut l: u64 = (b.value.typed::<u64>() >> 32) & 0xFFFFFFFF;
     let mut r: u64 = b.value & 0xFFFFFFFF;
     for i in 0..n {
         // The round keys are replayed in reverse.
         let rd: u64 = n - 1 - i;
-        let mut k: u64 = b.seed ^ (rd * 0x9E3779B97F4A7C15);
+        let mut k: u64 = b.seed.typed::<u64>() ^ (rd * 0x9E3779B97F4A7C15);
         let mut j: u64 = 0;
         while j < 5 {
             if j == 2 {

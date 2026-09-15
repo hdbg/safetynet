@@ -2,7 +2,7 @@
 
 #![allow(clippy::manual_is_multiple_of)]
 
-use safetynet::{VmLayout, safetynet};
+use safetynet::{Typed, VmLayout, safetynet};
 
 #[safetynet]
 fn outer_after_shadow(c: bool) -> u64 {
@@ -40,12 +40,12 @@ struct Reading {
 
 #[safetynet]
 fn is_negative(r: Reading) -> bool {
-    r.value < 0
+    r.value.typed::<i64>() < 0
 }
 
 #[safetynet]
 fn halved(r: Reading) -> i64 {
-    r.value / 2
+    r.value.typed::<i64>() / 2
 }
 
 #[test]

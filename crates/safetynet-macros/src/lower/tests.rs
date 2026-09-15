@@ -161,3 +161,41 @@ fn an_inclusive_range_is_refused() {
             .contains("range")
     );
 }
+
+#[test]
+fn a_typed_field_read_lowers_without_a_cell() {
+    let cfg = graph("fn f(p: Packet) -> u32 { p.seq.typed::<u32>() }");
+    assert_eq!(
+        format!("{cfg:?}"),
+        "b0:\n    $push .input\n    $field #0\n    add\n    $loadfield #0\n    halt\n"
+    );
+    assert_resolves(&cfg);
+}
+
+#[test]
+fn a_typed_field_may_go_bare_afterwards() {
+    assert_resolves(&graph(
+        "fn f(p: Packet) -> u32 { if p.seq.typed::<u32>() > 100 { return 100; } p.seq }",
+    ));
+}
+
+#[test]
+fn an_untyped_field_read_is_refused_with_the_fix_spelled_out() {
+    let message = refusal("fn f(p: Packet) -> u32 { p.seq }");
+    assert!(message.contains("cannot be resolved"));
+    assert!(message.contains("help: name it at the field's first use: `p.seq.typed::<u32>()`"));
+    assert!(refusal("fn f(p: Packet) -> u32 { p.seq + 1 }").contains(".typed"));
+}
+
+#[test]
+fn a_conflicting_field_type_is_refused() {
+    assert!(
+        refusal("fn f(p: Packet) -> u64 { p.seq.typed::<u32>() + p.seq.typed::<u64>() }")
+            .contains("already typed as `u32`")
+    );
+}
+
+#[test]
+fn a_missing_turbofish_is_refused() {
+    assert!(refusal("fn f(p: Packet) -> u32 { p.seq.typed() }").contains("needs the type"));
+}

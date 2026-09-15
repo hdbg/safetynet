@@ -8,7 +8,7 @@
 use std::error::Error;
 use std::fmt::Write as _;
 
-use safetynet::{VmLayout, safetynet};
+use safetynet::{Typed, VmLayout, safetynet};
 
 const SEED: u64 = 0x2545_f491_4f6c_dd1d;
 const MUL: u64 = 0x5851_f42d_4c95_7f2d;
@@ -30,16 +30,16 @@ struct Config {
 /// word width, including in debug builds. Packing is little-endian on the host.
 #[safetynet]
 fn cipher(config: Config) -> u64 {
-    if config.passthrough {
-        return config.input;
+    if config.passthrough.typed::<bool>() {
+        return config.input.typed::<u64>();
     }
 
-    let mut state: u64 = config.seed;
+    let mut state: u64 = config.seed.typed::<u64>();
     // Advance to this chunk using exponentiation of the affine LCG step.
     // This keeps each chunk independent without replaying the entire prefix.
-    let mut offset: u64 = config.offset;
-    let mut multiplier: u64 = config.multiplier;
-    let mut increment: u64 = config.increment;
+    let mut offset: u64 = config.offset.typed::<u64>();
+    let mut multiplier: u64 = config.multiplier.typed::<u64>();
+    let mut increment: u64 = config.increment.typed::<u64>();
     while offset > 0 {
         if offset & 1 != 0 {
             state = state * multiplier + increment;
@@ -50,7 +50,7 @@ fn cipher(config: Config) -> u64 {
     }
 
     let mut output: u64 = 0;
-    let len: u64 = config.len;
+    let len: u64 = config.len.typed::<u64>();
     for i in 0..len {
         state = state * config.multiplier + config.increment;
         let key: u64 = (state ^ (state >> 33)) & 0xff;

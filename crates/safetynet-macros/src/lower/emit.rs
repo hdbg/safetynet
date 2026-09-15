@@ -60,7 +60,7 @@ pub(crate) fn expand(attr: TokenStream, item: TokenStream) -> syn::Result<TokenS
     let hidden = format_ident!("__sn_ref_{name}");
     let program_fn = format_ident!("__sn_program_{name}");
 
-    // The original body, renamed and made private: the compiler type-checks it.
+    // The original body, renamed and made private: the compiler type-checks
     let mut reference = func.clone();
     reference.sig.ident = hidden.clone();
     reference.vis = syn::Visibility::Inherited;

@@ -1,4 +1,4 @@
-use safetynet::{VmLayout, safetynet};
+use safetynet::{Typed, VmLayout, safetynet};
 
 #[derive(Clone, Copy, VmLayout)]
 struct Counter {
@@ -8,7 +8,7 @@ struct Counter {
 #[safetynet]
 fn below_limit(p: Counter) -> bool {
     let limit: u32 = 10;
-    p.seq < limit
+    p.seq.typed::<u32>() < limit
 }
 
 fn main() {

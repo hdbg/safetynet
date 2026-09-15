@@ -26,7 +26,7 @@ pub use isa::{FrameSize, Instr, Op};
 pub use link::{Hole, Patch, link};
 pub use marshal::{Field, TypeLayout, VmLayout};
 pub use program::Program;
-pub use value::VmValue;
+pub use value::{Same, Typed, VmValue};
 
 /// Implementation detail of the derives; not a stable API.
 #[doc(hidden)]

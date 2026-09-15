@@ -7,7 +7,7 @@ struct Frame {
 
 #[safetynet]
 fn len_is_zero(f: Frame) -> bool {
-    f.len == 0
+    f.len.typed::<u16>() == 0
 }
 
 fn main() {}
