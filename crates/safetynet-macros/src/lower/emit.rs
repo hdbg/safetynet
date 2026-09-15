@@ -65,7 +65,10 @@ pub(crate) fn expand(attr: TokenStream, item: TokenStream) -> syn::Result<TokenS
     reference.sig.ident = hidden.clone();
     reference.vis = syn::Visibility::Inherited;
 
-    // The public function: marshal, run, read back.
+    // The public function: marshal, run, read back. The original's attributes
+    // ride along — docs, `#[must_use]`, lints — since this is the function
+    // callers actually see.
+    let attrs = &func.attrs;
     let vis = &func.vis;
     let sig = &func.sig;
     let args = param_names(&func)?;
@@ -73,6 +76,7 @@ pub(crate) fn expand(attr: TokenStream, item: TokenStream) -> syn::Result<TokenS
     let (input_len, input_bytes, marshal) =
         input_shape(aggregate.as_ref(), &args, &param_offsets, input_size);
     let public = quote! {
+        #(#attrs)*
         #vis #sig {
             let mut __sn_input = #input_len;
             #marshal
