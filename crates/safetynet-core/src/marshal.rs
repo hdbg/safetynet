@@ -149,8 +149,7 @@ impl Field {
 /// so a derive can size, place and marshal every field the same way rather than
 /// telling a scalar from a nested struct by its tokens.
 pub trait VmLayout: Sized {
-    /// The canonical flat layout: the single source of truth for offsets. Empty
-    /// for a scalar.
+    /// The flat layout every offset is read from. Empty for a scalar.
     const LAYOUT: &'static TypeLayout;
 
     /// Total bytes occupied in the image.

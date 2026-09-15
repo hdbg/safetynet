@@ -18,7 +18,7 @@ struct Packet {
     tag: u64,
 }
 
-/// The oracle: `Header` written out by hand, exactly as Phase 4 did it.
+/// The oracle: `Header`'s layout and marshalling written out by hand.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct HandHeader {
     seq: u32,
@@ -94,8 +94,7 @@ fn nested_layouts_are_recorded() {
     );
 }
 
-/// The whole point: the derive marshals byte-for-byte what the hand impl does,
-/// in either order.
+/// The derive marshals byte-for-byte what the hand impl does, in either order.
 fn derive_matches_the_hand_impl<B: ByteOrder>() {
     let derived = Header {
         seq: 0xdead_beef,

@@ -92,7 +92,7 @@ fn disassemble<B: ByteOrder>(program: &Program<B>) -> Vec<Instr> {
     out
 }
 
-/// The phase's own bar: a graph built by hand runs on the machine.
+/// A graph built by hand runs on the machine.
 fn a_graph_runs_on_the_machine<B: ByteOrder>() {
     let program = finalize::<B>(&sum_to(5, false), &layout(1024)).expect("finalizes");
 

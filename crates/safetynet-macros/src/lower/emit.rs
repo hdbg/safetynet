@@ -13,8 +13,8 @@ use safetynet_core::ir::resolve;
 use super::build::{self, Lowered};
 use crate::backend;
 
-/// Words of operand stack to reserve beyond the frame. Straight-line scalar
-/// code needs only a handful; the margin is for the expressions on top of it.
+/// Bytes of operand stack to reserve beyond the frame. Straight-line scalar
+/// code needs only a few words; the margin is for the expressions on top.
 const STACK_MARGIN: u32 = 4096;
 
 /// Instructions a run may take before it is called a runaway.
@@ -64,8 +64,7 @@ pub(crate) fn expand(attr: TokenStream, item: TokenStream) -> syn::Result<TokenS
     let hidden = format_ident!("__sn_ref_{name}");
     let program_fn = format_ident!("__sn_program_{name}");
 
-    // The original body, renamed and made private: the compiler type-checks it,
-    // and it is the oracle a later differential harness compares against.
+    // The original body, renamed and made private: the compiler type-checks it.
     let mut reference = func.clone();
     reference.sig.ident = hidden.clone();
     reference.vis = syn::Visibility::Inherited;
