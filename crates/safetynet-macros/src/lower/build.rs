@@ -121,7 +121,6 @@ pub(crate) fn lower(func: &syn::ItemFn) -> syn::Result<Lowered> {
     let mut layouts = Vec::new();
     let mut param_offsets = Vec::new();
     let mut scope: HashMap<String, Binding> = HashMap::new();
-    let mut types: HashMap<String, Scalar> = HashMap::new();
     let mut aggregate: Option<(String, syn::Type)> = None;
     let mut offset = 0u32;
     for arg in &func.sig.inputs {
@@ -130,8 +129,7 @@ pub(crate) fn lower(func: &syn::ItemFn) -> syn::Result<Lowered> {
             Some(scalar) => {
                 offset = offset.next_multiple_of(scalar.align());
                 param_offsets.push(offset);
-                scope.insert(name.clone(), Binding::Param { offset, ty: scalar });
-                types.insert(name, scalar);
+                scope.insert(name, Binding::Param { offset, ty: scalar });
                 offset += scalar.size();
                 bindings.push(ty_node.clone());
             }
@@ -151,26 +149,14 @@ pub(crate) fn lower(func: &syn::ItemFn) -> syn::Result<Lowered> {
     let input_size = offset;
     bindings.push(ret_ty.clone());
 
-    // One cell per local, wherever it is declared, in the order lowering reaches
-    // them. Locals live in statement blocks; value blocks hold none. `types`
-    // tracks the scalar of each name so a `for` bound's type can be read here,
-    // where the cell for its loop variable is allocated.
-    let mut frame = Frame::new();
-    let mut cells = Vec::new();
-    collect_cells(
-        &func.block,
-        &mut frame,
-        &mut cells,
-        &mut bindings,
-        &mut types,
-    )?;
-
-    let mut builder = Cfg::builder(frame);
+    // Locals get their cells as lowering reaches each `let`: the builder grows
+    // the frame in place
+    let mut builder = Cfg::builder(Frame::new());
     let entry = builder.block(0);
     let mut lowerer = Lowerer {
         builder,
         scope,
-        cells: cells.into_iter(),
+        bindings,
         loops: Vec::new(),
         field_refs: Vec::new(),
         aggregate: aggregate.clone(),
@@ -179,6 +165,7 @@ pub(crate) fn lower(func: &syn::ItemFn) -> syn::Result<Lowered> {
     };
     lowerer.lower_fn_body(&func.block)?;
     let field_refs = lowerer.field_refs;
+    let bindings = lowerer.bindings;
     let cfg = lowerer
         .builder
         .build(entry)
@@ -196,85 +183,13 @@ pub(crate) fn lower(func: &syn::ItemFn) -> syn::Result<Lowered> {
     })
 }
 
-/// Allocates a cell for every local, recursing into the statement blocks
-/// lowering will reach in the same order.
-fn collect_cells(
-    block: &syn::Block,
-    frame: &mut Frame,
-    cells: &mut Vec<CellId>,
-    bindings: &mut Vec<syn::Type>,
-    types: &mut HashMap<String, Scalar>,
-) -> syn::Result<()> {
-    for stmt in &block.stmts {
-        match stmt {
-            syn::Stmt::Local(local) => {
-                let (name, scalar, ty_node) = declared_local(local)?;
-                let cell = frame
-                    .add(scalar.width)
-                    .ok_or_else(|| err(&local.pat, "the frame is too large"))?;
-                cells.push(cell);
-                bindings.push(ty_node);
-                types.insert(name, scalar);
-            }
-            syn::Stmt::Expr(syn::Expr::If(if_expr), _) => {
-                collect_cells(&if_expr.then_branch, frame, cells, bindings, types)?;
-                if let Some((_, else_expr)) = &if_expr.else_branch {
-                    collect_else_cells(else_expr, frame, cells, bindings, types)?;
-                }
-            }
-            syn::Stmt::Expr(syn::Expr::While(while_expr), _) => {
-                collect_cells(&while_expr.body, frame, cells, bindings, types)?;
-            }
-            syn::Stmt::Expr(syn::Expr::Loop(loop_expr), _) => {
-                collect_cells(&loop_expr.body, frame, cells, bindings, types)?;
-            }
-            syn::Stmt::Expr(syn::Expr::ForLoop(for_expr), _) => {
-                // Two cells: the loop variable, and a snapshot of the end bound.
-                let (start, end) = range_bounds(for_expr)?;
-                let scalar = range_scalar(&|name| types.get(name).copied(), start, end);
-                for _ in 0..2 {
-                    let cell = frame
-                        .add(scalar.width)
-                        .ok_or_else(|| err(&for_expr.pat, "the frame is too large"))?;
-                    cells.push(cell);
-                }
-                if let Some(name) = for_var(for_expr)? {
-                    types.insert(name, scalar);
-                }
-                collect_cells(&for_expr.body, frame, cells, bindings, types)?;
-            }
-            _ => {}
-        }
-    }
-    Ok(())
-}
-
-/// Cell collection for the `else` of an `if`: a block, or an `else if`.
-fn collect_else_cells(
-    else_expr: &syn::Expr,
-    frame: &mut Frame,
-    cells: &mut Vec<CellId>,
-    bindings: &mut Vec<syn::Type>,
-    types: &mut HashMap<String, Scalar>,
-) -> syn::Result<()> {
-    match else_expr {
-        syn::Expr::Block(block) => collect_cells(&block.block, frame, cells, bindings, types),
-        syn::Expr::If(if_expr) => {
-            collect_cells(&if_expr.then_branch, frame, cells, bindings, types)?;
-            if let Some((_, inner)) = &if_expr.else_branch {
-                collect_else_cells(inner, frame, cells, bindings, types)?;
-            }
-            Ok(())
-        }
-        _ => Ok(()),
-    }
-}
-
 /// The state threaded through lowering a body.
 struct Lowerer {
     builder: Builder,
     scope: HashMap<String, Binding>,
-    cells: std::vec::IntoIter<CellId>,
+    /// Types the call site must prove are `VmValue`, appended as locals are
+    /// lowered.
+    bindings: Vec<syn::Type>,
     loops: Vec<Loop>,
     /// Field references, appended as field accesses are lowered.
     field_refs: Vec<FieldRef>,
@@ -376,11 +291,12 @@ impl Lowerer {
 
     /// Lowers a `let`, storing the initializer into the local's cell.
     fn lower_let(&mut self, local: &syn::Local) -> syn::Result<()> {
-        let (name, scalar, _) = declared_local(local)?;
+        let (name, scalar, ty_node) = declared_local(local)?;
         let cell = self
-            .cells
-            .next()
-            .ok_or_else(|| err(&local.pat, "a local without a cell"))?;
+            .builder
+            .cell(scalar.width)
+            .ok_or_else(|| err(&local.pat, "the frame is too large"))?;
+        self.bindings.push(ty_node);
         let init = &local
             .init
             .as_ref()
@@ -517,13 +433,13 @@ impl Lowerer {
         let scalar = range_scalar(&|name| self.scope.get(name).map(binding_scalar), start, end);
 
         let i_cell = self
-            .cells
-            .next()
-            .ok_or_else(|| err(&for_expr.pat, "a loop variable without a cell"))?;
+            .builder
+            .cell(scalar.width)
+            .ok_or_else(|| err(&for_expr.pat, "the frame is too large"))?;
         let end_cell = self
-            .cells
-            .next()
-            .ok_or_else(|| err(&for_expr.pat, "a loop bound without a cell"))?;
+            .builder
+            .cell(scalar.width)
+            .ok_or_else(|| err(&for_expr.pat, "the frame is too large"))?;
 
         // i = start; end = b.
         self.lower_expr(start, scalar, 0)?;

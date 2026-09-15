@@ -2,7 +2,7 @@
 
 use super::{Block, BlockId, Cfg, Frame, Item, Terminator};
 use crate::ir::CellId;
-use crate::{Instr, Region};
+use crate::{Instr, Region, Width};
 
 /// Builds a [`Cfg`].
 ///
@@ -99,6 +99,11 @@ impl Builder {
             code: Vec::new(),
         }));
         id
+    }
+
+    /// Adds a frame cell, or `None` when the frame cannot hold it.
+    pub fn cell(&mut self, width: Width) -> Option<CellId> {
+        self.frame.add(width)
     }
 
     /// The body of an open block, to append to.
