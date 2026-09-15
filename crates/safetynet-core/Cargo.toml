@@ -9,6 +9,7 @@ repository.workspace = true
 
 [dependencies]
 musli = { version = "0.1.7", default-features = false, features = ["alloc", "storage"] }
+safetynet-blackbox.workspace = true
 thiserror.workspace = true
 
 [lints]

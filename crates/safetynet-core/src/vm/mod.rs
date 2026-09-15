@@ -206,6 +206,7 @@ impl<B: ByteOrder> Vm<B> {
     ///
     /// One instruction, once: counting them, and deciding when there have been
     /// too many, is the caller's.
+    #[inline(always)]
     pub fn step(&mut self, instr: Instr) -> Result<Flow, Trap> {
         instr.exec(self)
     }
@@ -226,6 +227,7 @@ impl<B: ByteOrder> Vm<B> {
     }
 
     /// Pushes a word, growing the stack by [`WORD_SIZE`] bytes.
+    #[inline(always)]
     pub fn push(&mut self, value: Word) -> Result<(), Trap> {
         let top = self.sp.checked_add(WORD_SIZE).ok_or(Trap::StackOverflow)?;
         if top > self.stack.end {
@@ -243,6 +245,7 @@ impl<B: ByteOrder> Vm<B> {
     }
 
     /// Pops a word, shrinking the stack by [`WORD_SIZE`] bytes.
+    #[inline(always)]
     pub fn pop(&mut self) -> Result<Word, Trap> {
         let bottom = self.sp.checked_sub(WORD_SIZE).ok_or(Trap::StackUnderflow)?;
         if bottom < self.stack.start {
@@ -260,12 +263,14 @@ impl<B: ByteOrder> Vm<B> {
     }
 
     /// Pushes a constant that an instruction carried as an immediate.
+    #[inline(always)]
     pub(crate) fn push_imm(&mut self, value: Word) -> Result<Flow, Trap> {
         self.push(value)?;
         Ok(Flow::Next)
     }
 
     /// Discards the top word.
+    #[inline(always)]
     pub(crate) fn drop_word(&mut self) -> Result<Flow, Trap> {
         self.pop()?;
         Ok(Flow::Next)
@@ -274,6 +279,7 @@ impl<B: ByteOrder> Vm<B> {
     /// Reserves a frame. The reserved bytes keep whatever the last frame left
     /// there: nothing reads a cell before writing it, and zeroing would charge
     /// every prologue for a guarantee no correct program needs.
+    #[inline(always)]
     pub(crate) fn alloc(&mut self, n: FrameSize) -> Result<Flow, Trap> {
         let top = self
             .sp
@@ -289,6 +295,7 @@ impl<B: ByteOrder> Vm<B> {
     }
 
     /// Releases a frame.
+    #[inline(always)]
     pub(crate) fn free(&mut self, n: FrameSize) -> Result<Flow, Trap> {
         let bottom = self
             .sp
@@ -304,6 +311,7 @@ impl<B: ByteOrder> Vm<B> {
     }
 
     /// Pops an address and pushes the value there, zero-extended to a word.
+    #[inline(always)]
     pub(crate) fn load(&mut self, width: Width) -> Result<Flow, Trap> {
         let address = self.pop()?;
         let value = self.read(Self::offset(address, width)?, width, address)?;
@@ -312,6 +320,7 @@ impl<B: ByteOrder> Vm<B> {
     }
 
     /// Pops a value, then an address, and writes the value's low bytes there.
+    #[inline(always)]
     pub(crate) fn store(&mut self, width: Width) -> Result<Flow, Trap> {
         let value = self.pop()?;
         let address = self.pop()?;
@@ -320,6 +329,7 @@ impl<B: ByteOrder> Vm<B> {
     }
 
     /// Pushes the frame cell at `SP - disp`, zero-extended to a word.
+    #[inline(always)]
     pub(crate) fn load_frame(&mut self, disp: u16, width: Width) -> Result<Flow, Trap> {
         let cell = self.cell(disp)?;
         let value = self.read(cell, width, cell as Word)?;
@@ -332,6 +342,7 @@ impl<B: ByteOrder> Vm<B> {
     /// The displacement is measured against `SP` *before* the pop, which is the
     /// depth the IR tracks at this instruction — the value being stored is still
     /// counted as on the stack.
+    #[inline(always)]
     pub(crate) fn store_frame(&mut self, disp: u16, width: Width) -> Result<Flow, Trap> {
         let cell = self.cell(disp)?;
         let value = self.pop()?;
@@ -341,6 +352,7 @@ impl<B: ByteOrder> Vm<B> {
 
     /// Pops two operands and pushes the result. The right-hand operand is on
     /// top, so `push a; push b; sub` computes `a - b`.
+    #[inline(always)]
     pub(crate) fn binary(&mut self, op: impl FnOnce(Word, Word) -> Word) -> Result<Flow, Trap> {
         let rhs = self.pop()?;
         let lhs = self.pop()?;
@@ -349,6 +361,7 @@ impl<B: ByteOrder> Vm<B> {
     }
 
     /// [`Vm::binary`] for the operations that can fail: the four divisions.
+    #[inline(always)]
     pub(crate) fn binary_checked(
         &mut self,
         op: impl FnOnce(Word, Word) -> Result<Word, Trap>,
@@ -360,6 +373,7 @@ impl<B: ByteOrder> Vm<B> {
     }
 
     /// Replaces the top word with a function of itself.
+    #[inline(always)]
     pub(crate) fn unary(&mut self, op: impl FnOnce(Word) -> Word) -> Result<Flow, Trap> {
         let value = self.pop()?;
         self.push(op(value))?;
@@ -367,6 +381,7 @@ impl<B: ByteOrder> Vm<B> {
     }
 
     /// Pops two operands and pushes a full word, 0 or 1.
+    #[inline(always)]
     pub(crate) fn compare(&mut self, op: impl FnOnce(Word, Word) -> bool) -> Result<Flow, Trap> {
         let rhs = self.pop()?;
         let lhs = self.pop()?;
@@ -375,6 +390,7 @@ impl<B: ByteOrder> Vm<B> {
     }
 
     /// Pops a word and branches if it is zero.
+    #[inline(always)]
     pub(crate) fn jump_if_zero(&mut self, offset: i32) -> Result<Flow, Trap> {
         let taken = self.pop()? == 0;
         Ok(if taken {
@@ -385,6 +401,7 @@ impl<B: ByteOrder> Vm<B> {
     }
 
     /// Pops a word and branches if it is not zero.
+    #[inline(always)]
     pub(crate) fn jump_if_not_zero(&mut self, offset: i32) -> Result<Flow, Trap> {
         let taken = self.pop()? != 0;
         Ok(if taken {
@@ -399,6 +416,7 @@ impl<B: ByteOrder> Vm<B> {
     /// `width` and `address` only travel so that a failure can say what was
     /// attempted; on a 64-bit host the conversion itself cannot fail, and the
     /// bounds check that matters happens at the access.
+    #[inline(always)]
     fn offset(address: Word, width: Width) -> Result<usize, Trap> {
         usize::try_from(address).map_err(|_| Trap::OutOfBounds {
             address,
@@ -407,6 +425,7 @@ impl<B: ByteOrder> Vm<B> {
     }
 
     /// The address of the frame cell `disp` bytes back from `SP`.
+    #[inline(always)]
     fn cell(&self, disp: u16) -> Result<usize, Trap> {
         let cell = self
             .sp
@@ -421,6 +440,7 @@ impl<B: ByteOrder> Vm<B> {
     }
 
     /// Reads `width` bytes, zero-extended to a word.
+    #[inline(always)]
     fn read(&self, offset: usize, width: Width, address: Word) -> Result<Word, Trap> {
         let out_of_bounds = || Trap::OutOfBounds {
             address,
@@ -440,6 +460,7 @@ impl<B: ByteOrder> Vm<B> {
     ///
     /// The narrowing is the point rather than a loss: storing into a one-byte
     /// cell *is* the mask a `u8` computation would otherwise have to apply.
+    #[inline(always)]
     fn write(
         &mut self,
         offset: usize,

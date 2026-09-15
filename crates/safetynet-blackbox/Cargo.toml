@@ -1,0 +1,19 @@
+[package]
+name = "safetynet-blackbox"
+description = "A proc-macro that wraps a block's expressions in std::hint::black_box."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lib]
+proc-macro = true
+
+[dependencies]
+proc-macro2.workspace = true
+quote.workspace = true
+syn = { workspace = true, features = ["visit-mut"] }
+
+[lints]
+workspace = true
