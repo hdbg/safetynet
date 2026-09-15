@@ -1,14 +1,12 @@
-//! The shared backend: a resolved graph becomes the tokens that rebuild it.
+//! The backend: a resolved graph becomes the tokens that rebuild it.
 //!
-//! Both front-ends resolve to the same graph and need the same bytes out the
-//! other side — the encoded instructions, the region-base relocations the host
-//! fills in, and the field/discriminant holes the linker bakes at compile time.
-//! That tail lives here so there is one copy of it, shared by the `asm!` text
-//! assembler and the `#[safetynet]` lowerer.
+//! The lowerer resolves to a graph; what comes out the other side is the
+//! encoded instructions, the region-base relocations the host fills in, and
+//! the field holes the linker bakes at compile time.
 
 use proc_macro2::{Literal, TokenStream};
 use quote::quote;
-use safetynet_core::encoding::{Packed, encode, push32_immediate, push64_immediate};
+use safetynet_core::encoding::{Packed, encode, push32_immediate};
 use safetynet_core::ir::Resolved;
 use safetynet_core::isa::{Ld8, Ld32, Ld64};
 use safetynet_core::{Be, Instr, Le, Region};
@@ -20,12 +18,6 @@ use syn::spanned::Spanned;
 pub(crate) struct FieldRef {
     pub(crate) ty: syn::Type,
     pub(crate) path: Vec<syn::Ident>,
-}
-
-/// A variant reference the call site resolves to a discriminant word.
-#[derive(Debug)]
-pub(crate) struct TagRef {
-    pub(crate) path: Path,
 }
 
 /// The two byte orders the backend can encode against at expansion.
@@ -45,9 +37,16 @@ pub(crate) fn emit_artifact(
     order: &Path,
     resolved: &Resolved,
     field_refs: &[FieldRef],
-    tag_refs: &[TagRef],
 ) -> syn::Result<TokenStream> {
     let which = concrete_order(order)?;
+
+    // The IR can hold a tag reference, but nothing here produces one.
+    if !resolved.tag_relocs().is_empty() {
+        return Err(syn::Error::new(
+            order.span(),
+            "a tag reference has nothing to resolve it",
+        ));
+    }
 
     // Encode in the chosen order, recording where each instruction begins so a
     // relocation can name the byte its push starts at. A region base resolves to
@@ -85,19 +84,15 @@ pub(crate) fn emit_artifact(
 
     // Where each push's immediate lands and how it is ordered, probed from the
     // very encoder that wrote the bytes above — the linker patches into that
-    // rather than assuming a shape. Field offsets ride a push32, discriminants a
-    // push64.
-    let immediate = |wide: bool| match (which, wide) {
-        (Order::Le, false) => push32_immediate(&Packed::<Le>::new()),
-        (Order::Be, false) => push32_immediate(&Packed::<Be>::new()),
-        (Order::Le, true) => push64_immediate(&Packed::<Le>::new()),
-        (Order::Be, true) => push64_immediate(&Packed::<Be>::new()),
+    // rather than assuming a shape. Field offsets ride a push32.
+    let immediate = || match which {
+        Order::Le => push32_immediate(&Packed::<Le>::new()),
+        Order::Be => push32_immediate(&Packed::<Be>::new()),
     };
-    let missing = |wide: bool| {
-        let push = if wide { "push64" } else { "push32" };
+    let missing = || {
         syn::Error::new(
             order.span(),
-            format!("the encoder has no {push} immediate to patch"),
+            "the encoder has no push32 immediate to patch",
         )
     };
     let at_of = |imm: &safetynet_core::Immediate, index: usize| {
@@ -107,7 +102,7 @@ pub(crate) fn emit_artifact(
     let mut patches = Vec::new();
 
     if !resolved.field_relocs().is_empty() {
-        let imm = immediate(false).ok_or_else(|| missing(false))?;
+        let imm = immediate().ok_or_else(missing)?;
         let (width, big_endian) = (Literal::usize_suffixed(imm.width), imm.big_endian);
         for reloc in resolved.field_relocs() {
             let at = at_of(&imm, reloc.index);
@@ -131,29 +126,6 @@ pub(crate) fn emit_artifact(
                         layout: <#ty as ::safetynet::VmLayout>::LAYOUT,
                         path: &[#(#names),*],
                     },
-                }
-            });
-        }
-    }
-
-    if !resolved.tag_relocs().is_empty() {
-        let imm = immediate(true).ok_or_else(|| missing(true))?;
-        let (width, big_endian) = (Literal::usize_suffixed(imm.width), imm.big_endian);
-        for reloc in resolved.tag_relocs() {
-            let at = at_of(&imm, reloc.index);
-            let tag = tag_refs.get(reloc.hole as usize).ok_or_else(|| {
-                syn::Error::new(
-                    order.span(),
-                    "a tag reference went missing while assembling",
-                )
-            })?;
-            let path = &tag.path;
-            patches.push(quote! {
-                ::safetynet::Patch {
-                    at: #at,
-                    width: #width,
-                    big_endian: #big_endian,
-                    hole: ::safetynet::Hole::Word(#path as ::safetynet::Word),
                 }
             });
         }

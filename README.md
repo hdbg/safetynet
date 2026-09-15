@@ -22,67 +22,14 @@ Expanding `#[safetynet]` produces the **replaced function** (body swapped for
 *marshal → run → unmarshal*), the **embedded program** (bytecode plus memory
 image, built at compile time).
 
-## Assembling by hand: `safetynet::asm!`
-
-Under that lowerer is a textual front-end you can use directly. It takes a byte
-order and assembly with labels and named frame cells, and evaluates to an
-`Artifact<Order>` — validated, laid out, and encoded at expansion time:
-
-```rust
-use safetynet::{Artifact, Le};
-
-fn program() -> Artifact<Le> {
-    safetynet::asm!(Le {
-        .frame { cursor: u64 }
-    entry:
-        $push .input       // the input region's base — filled in at finalize
-        $store cursor
-        $load cursor
-        halt
-    })
-}
-```
-
-Labels open blocks and terminators close them; cells are reached by name, so
-nothing in the source is a byte offset or an address. `cargo expand` shows there
-is no IR or interpreter left in the output — just finished bytecode, a
-compile-time linker call, and a relocation for the one address the program
-cannot settle on its own:
+`cargo expand` shows there is no IR or interpreter left in the output — just
+finished bytecode, a compile-time linker call that bakes field constants into
+the bytes, and a relocation for each region-base address the program cannot
+settle on its own. `finalize` runs the relocations against a layout and returns
+runnable bytecode; the VM executes it in the program's byte order:
 
 ```rust
-fn program() -> Artifact<Le> {
-    // link bakes any $field/$tag constants into the bytes at compile time;
-    // this program has none, so it is handed an empty patch list.
-    const CODE: &[u8] = &::safetynet::link::<15>(
-        [
-            5u8, 8u8, 0u8,              // alloc 8      — frame prologue
-            2u8, 0u8, 0u8, 0u8, 0u8,    // push32 0     — .input base placeholder
-            12u8, 16u8, 0u8,            // sts64 16     — store cursor
-            9u8, 8u8, 0u8,              // lds64 8      — load cursor
-            0u8,                        // halt
-        ],
-        &[],
-    );
-    ::safetynet::Artifact::<Le>::new(
-        CODE,
-        ::safetynet::FrameSize::new(8u16).unwrap_or_default(),
-        ::std::vec![
-            ::safetynet::Reloc::region_base::<::safetynet::encoding::Packed<Le>>(
-                3usize,
-                ::safetynet::Region::Input,
-            ),
-        ],
-    )
-}
-```
-
-(The relocation's `vec!` is shown collapsed; nightly `cargo expand` renders that
-macro's internals.) `$push .input` became a placeholder `push32 0` at byte 3,
-paired with a relocation over the packed encoder. `finalize` runs the relocations against a layout and
-returns runnable bytecode; the VM executes it in the artifact's byte order:
-
-```rust
-let program = program().finalize(&layout)?;   // fills push32 with .input's base
+let program = artifact.finalize(&layout)?;   // fills each placeholder push with its region's base
 let vm = Vm::<Le>::new(image).run(&program, fuel)?;   // result left on the stack
 ```
 
@@ -101,8 +48,8 @@ code. Out-of-subset constructs are rejected at compile time with a pointing erro
 ```
 crates/
   safetynet-core     opcode table, IR types, traits, byte-order policy,
-                     layout descriptors, assembler, interpreter
-  safetynet-macros   proc-macros: #[safetynet], #[derive(VmLayout)], asm!
+                     layout descriptors, interpreter
+  safetynet-macros   proc-macros: #[safetynet], #[derive(VmLayout)]
   safetynet          the façade crate downstream code depends on
   safetynet-demo     a sample cipher lowered from Rust with #[safetynet]
 docs/spec.md         the full specification and design review

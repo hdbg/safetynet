@@ -41,14 +41,10 @@ pub(crate) fn expand(attr: TokenStream, item: TokenStream) -> syn::Result<TokenS
         ret,
     } = build::lower(&func)?;
 
-    // A debugging window on the compiler: `SN_DUMP_ASM=1` prints what each
-    // function lowered to, as the assembly the disassembler would show.
-    if std::env::var_os("SN_DUMP_ASM").is_some() {
-        eprintln!(
-            "// {}\n{}",
-            func.sig.ident,
-            safetynet_core::asm::print(&cfg)
-        );
+    // A debugging window on the compiler: `SN_DUMP_IR=1` prints the graph each
+    // function lowered to.
+    if std::env::var_os("SN_DUMP_IR").is_some() {
+        eprintln!("// {}\n{cfg:?}", func.sig.ident);
     }
 
     let resolved = resolve(&cfg).map_err(|error| {
@@ -58,7 +54,7 @@ pub(crate) fn expand(attr: TokenStream, item: TokenStream) -> syn::Result<TokenS
     // The bytes are baked in one order; `Le` is the default until an argument
     // selects otherwise.
     let order: syn::Path = syn::parse_quote!(::safetynet::Le);
-    let program = backend::emit_artifact(&order, &resolved, &field_refs, &[])?;
+    let program = backend::emit_artifact(&order, &resolved, &field_refs)?;
 
     let name = &func.sig.ident;
     let hidden = format_ident!("__sn_ref_{name}");

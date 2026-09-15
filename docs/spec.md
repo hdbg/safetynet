@@ -42,9 +42,9 @@ a VM fault but is really an encoding mismatch.
 
 ```
 safetynet-core     opcode table (define_ops!), IR types, traits, byte-order
-                   policy, layout descriptors, assembler, interpreter
-safetynet-macros   proc-macros: #[safetynet], #[derive(VmLayout)], safetynet::asm!
-                   (thin; each builds a Cfg and calls core's pipeline)
+                   policy, layout descriptors, interpreter
+safetynet-macros   proc-macros: #[safetynet], #[derive(VmLayout)]
+                   (thin; the lowerer builds a Cfg and calls core's pipeline)
 safetynet          façade re-exporting core + macros
 ```
 
@@ -128,7 +128,7 @@ sequence inlined at each site.
 
 **The order is named literally at the source, never by cargo feature.** `Le` is
 the compiled-in default; anything else is written at the site —
-`#[safetynet(order = Be)]`, `safetynet::asm!(Be { … })`. `safetynet::Order` exists as an
+`#[safetynet(order = Be)]`. `safetynet::Order` exists as an
 alias for the default so signatures can spell it, but it is documentation, not
 configuration: the macro bakes `.rodata` bytes at expansion time and therefore
 needs a *concrete* order in hand, so it resolves the default itself rather than
@@ -249,7 +249,7 @@ the same order as everything else in the image.
 
 Every op is declared once, in a `define_ops!` table that generates the structs,
 the `Instr` enum with forwarding methods, the decode dispatch, and the mnemonic
-table shared by `safetynet::asm!` (§8.1) and the disassembler. `Instr` carries inherent
+each instruction prints as (§8.1). `Instr` carries inherent
 methods rather than `impl Op`: `OPCODE` and `MNEMONIC` are associated consts, and
 an enum ranging over the whole instruction set has no single value for either.
 The names and meanings are the same.
@@ -546,7 +546,7 @@ enum Terminator {
 
 Each block is straight-line and ends in exactly one terminator; edges are
 `BlockId`s. `sp_in` is the operand-stack depth **in bytes, above the frame** on
-entry to the block — recorded by the assembler as it parses and checked by the
+entry to the block — recorded by whoever builds the graph and checked by the
 validator, so it is an assertion rather than a datum to be trusted. Local
 access inside `code` is symbolic (`Local(cell)`), not an `LDS`/`STS` with a
 displacement; §3.1 explains why, and finalization is where the two meet.
@@ -569,137 +569,51 @@ lowering mistake is a spanned error rather than a wrong answer — which matters
 more than it did when locals were absolutely indexed, because the failure mode
 has changed from a runaway to a silent misread (§R9).
 
-### 8.1 `safetynet::asm!` — textual front-end to the CFG
+### 8.1 The graph's `Debug` listing
 
-`safetynet::asm!` is a proc-macro that takes assembly-like source with **jump labels**,
-resolves it to a `Cfg`, validates it, and finalizes it to a `Program<B>`. It
-computes no byte offsets of its own: labels become `BlockId` edges, and offsets
-appear only where they already appeared, in finalization.
+A `Cfg` formats (`{:?}`) as an assembly-like listing — labels for blocks, named
+frame cells, symbolic operands — so a test can assert against readable text and
+a dump can be reviewed by eye:
 
-It is a *front end*, not the backend. The lowerer (§9) builds a `Cfg` by calling
-the same `core` API this macro calls; neither goes through the other. What keeps
-the two honest is not a shared code path but a **shared property**, and it is
-normative:
-
-```
-parse(print(cfg)) == cfg        for every fixture, both orders
-```
-
-`print` is the disassembler and `parse` is this macro's front half, both of which
-have to exist anyway (§R8's round-trip). Running the property over the lowerer's
-own output means an asm surface that cannot express something the IR can is a
-*failing test*, not a discovery made a year later by someone trying to hand-write
-it. That is the dogfooding guarantee, bought without putting a parser on the
-production path (§R10).
-
-```rust
-const PROG: Program<Le> = safetynet::asm!(Le {
-    .frame   i: u32, acc: u8          // cells; the macro assigns byte offsets
-    .rodata  KEY: [u8; 5] = [0x1f, 0x8b, 0x00, 0x5a, 0xc3]
-
-entry:
-    enter                   // ALLOC <frame size, rounded to 8>, zeroed
-    push 0
-    $store acc              // STS.u8  — truncates to the cell's width
-    push 0
-    $store i
-head:
-    $load i                 // LDS.u32 — zero-extends to a word
-    push  5
-    lt
-    jz done                 // conditional; the other arm is fallthrough → body
-body:
-    $load acc
-    $push KEY               // .rodata symbol → base address
-    $load i
-    add
-    ld8
-    xor
-    $store acc
-    $load i
-    push  1
-    add
-    $store i
-    jmp head
-done:
-    $push .ret
-    $load acc
-    st8                     // result into .ret
-    leave                   // FREE <frame size>
+```text
+.frame { c0: u32 }
+b0:
+    $push .input
+    ld32
+    $store c0
+    $load c0
     halt
-});
 ```
 
-Rules:
+The shapes:
 
-- **A label opens a block; a terminator closes it.** Fallthrough into the next
-  label is materialized as an explicit `Jmp`, so every `Block` ends in exactly one
-  `Terminator` as §8 requires. Straight-line code that neither branches nor falls
-  into a label is a spanned error, not silent dead code.
-- **Conditionals name one target; the other is fallthrough.** `jz L` becomes
-  `Br { then: L, els: <next block> }` — `jz` takes the branch when the top of
-  stack is zero — and `jnz` is the same with the arms swapped. `switch` takes a
-  label list and a **mandatory** `default:` arm, which makes Review §R2's trapping
-  default a syntactic requirement rather than a convention.
-- **Symbols, never numbers.** Cells are named in `.frame` with widths and become
-  `Local(cell)` references; `.rodata` items are named and left for the finalizer
-  that places them to turn into base addresses; branch targets are labels. Nothing
-  in the source is a byte offset — which is precisely what makes the macro a
-  trustworthy test of the backpatching it does not perform.
-- **`load`/`store` are the whole point.** Each expands to `LDS.w k` / `STS.w k`
-  with `k = F − c + d` computed from the SP the macro is tracking at that exact
-  line (§3.1). Hand-writing those displacements is not realistic — one inserted
-  `push` shifts every subsequent access in the block — so SP-relative locals make
-  a symbolic assembler a requirement rather than a convenience. Raw `lds`/`sts`
-  with literal displacements stay spellable, for tests that target the
-  materialization itself.
-- **Field holes work here too.** `$field Packet::header.seq` emits the same
-  symbolic `Operand::Field` the lowerer emits (§6.2), so the relocation path can be
-  exercised before either the lowerer or the derive exists.
-- **Validation is the macro's job.** SP invariant, single terminator, edge
-  consistency, unknown or duplicate label, unknown cell, wrong arity — every
-  failure is a `syn::Error` on the offending token at expansion time. `safetynet::asm!`
-  runs entirely proc-macro-side, so like the rest of the assembler (§10) it is
-  categorically absent from the target binary.
-- **Byte order is the macro's first argument** and becomes the `B` of the emitted
-  `Program<B>`; omitting it uses `safetynet::Order`. `Vm<Be>` will not run a
-  `Program<Le>`.
-- *Note:* the example writes `push k` for an immediate constant, and §3's list has
-  no such opcode — an omission there, not a decision here. Whichever form Phase 1
-  settles on (a `PUSH8/PUSH32/PUSH64` family, or a `.rodata` load), the mnemonic is
-  the assembler's stable surface.
+- **A label opens a block, and every block prints its terminator.** An edge to
+  the block that follows still prints as an explicit `jmp`, so an edge is always
+  visible rather than inferred from block order.
+- **A conditional names the arm not reached by falling through.** `jnz b4` is a
+  `Br` whose zero arm is next; `jz` is the reverse; `br b1, b2` names both when
+  neither follows; `switch [b0, b1] default b2` spells its whole table.
+- **Symbols, never numbers.** `$load c0`/`$store c0` name frame cells, `$push
+  .input` pushes a region base, and `$field #0`/`$tag #0`/`$loadfield #0` show
+  the holes whose types and paths live outside the graph.
 
-Why this earns a phase of its own, ahead of the lowerer:
-
-1. **It replaces the throwaway.** Phase 1's hand-assembler is deleted by design;
-   this is its permanent successor, so the interpreter, the CFG builder and the
-   finalizer keep a working front-end that does not wait on the Rust subset.
-2. **It makes the IR legible.** `print`/`parse` turn a `Cfg` into text a human can
-   review, so a lowering test can assert against readable asm and a bug can be
-   bisected by hand-writing the expected program. `SN_DUMP_ASM=1` dumps what an
-   annotated function lowered to, which is the debugger the compiler otherwise
-   lacks.
-3. **It closes the round-trip gap.** `parse → Cfg → encode → decode → print →
-   parse` must reach a fixed point — Review §R8's missing property test, for both
-   orders — and the same printer/parser pair is what enforces surface totality
-   above.
-4. **It is where hand-written guest routines go** when the Rust subset cannot
-   express something, instead of widening the subset to accommodate it.
+It is an output, not a language: nothing parses it. It is what a failing
+lowerer test prints, what `SN_DUMP_IR=1` dumps (§11), and the before/after diff
+a mutation pass gets reviewed with (§14).
 
 ---
 
 ## 9. Compilation pipeline
 
-Two front-ends, one backend — and the backend is a library, not a macro:
+One front-end, one backend — and the backend is a library, not a macro:
 
 ```
- syn::ItemFn                             safetynet::asm! source (§8.1)
-   │  parse + subset check               │  parse; labels → BlockId edges
-   │  (spanned errors)                   │  (spanned errors)
-   ▼                                     ▼
- lower → IR (CFG)  ◄──────────────────────┘   frame layout; symbolic
-   │                                         cells, fields, consts;
-   │                                         structured CF → branches
+ syn::ItemFn
+   │  parse + subset check
+   │  (spanned errors)
+   ▼
+ lower → IR (CFG)          frame layout; symbolic cells, fields, consts;
+   │                       structured CF → branches
    │  validate (SP invariant, single-terminator, edge consistency, limits §R6)
    ▼
  [ mutation passes ]       ← omitted now; the seam lives exactly here
@@ -714,12 +628,11 @@ Two front-ends, one backend — and the backend is a library, not a macro:
 Block layout is chosen here; the backpatching becomes this single pass, and `B`
 is a type parameter of finalization rather than a flag read inside it.
 
-**The join is a typed API in `core`, not a text format.** Both macros construct a
-`Cfg` and hand it to the same `validate` → `passes` → `finalize<B>` chain, so
+**The join is a typed API in `core`, not a text format.** The lowerer constructs
+a `Cfg` and hands it to the same `validate` → `passes` → `finalize<B>` chain, so
 everything from validation down has one implementation and one test suite. The
-tempting alternative — have `#[safetynet]` emit `safetynet::asm!` source and let rustc
-expand it — was considered and rejected; §R10 records why, and §8.1's round-trip
-property recovers the parity argument that alternative was reaching for.
+tempting alternative — lower to assembly text and let a second macro expand it —
+was considered and rejected; §R10 records why.
 
 One consequence worth naming: because the lowerer holds both the `syn` nodes and
 the `Result` from `validate`, a backend rejection can be caught and reframed in
@@ -731,7 +644,7 @@ main thing a textual handoff would have thrown away.
 ## 10. Keeping the compiler and layout out of the binary
 
 The security goal: the shipped artifact contains only the finalized bytecode and
-image — not the assembler, not human-readable layout metadata.
+image — not the compiler, not human-readable layout metadata.
 
 **Split finalization by what each part must know.** Everything independent of
 struct layout — block layout, `BlockId`→offset backpatching, opcode encoding,
@@ -778,8 +691,8 @@ Applied to a function — or to a module, when intra-module calls are to be inli
    unmarshal, all three instantiated at the function's order (`safetynet::Order`,
    or the `order = …` argument).
 3. **Embedded program** — bytecode + image (see §10), built by calling `core`'s
-   pipeline during expansion. `SN_DUMP_ASM=1` additionally prints the lowered
-   program as `safetynet::asm!` source (§8.1) for inspection; it is a debugging output,
+   pipeline during expansion. `SN_DUMP_IR=1` additionally prints the lowered
+   graph as its `Debug` listing (§8.1) for inspection; it is a debugging output,
    not a build input.
 4. **Bound assertions** — the `VmValue` dead-code checks.
 5. **Differential harness** — `#[cfg(test)]` comparing reference and VM.
@@ -790,11 +703,10 @@ fn check(pkt: Packet) -> u32 { /* normal Rust */ }
 // → __sn_ref_check (original) + check (marshal→run→unmarshal) + PROGRAM + tests
 ```
 
-The lowerer can still be tested without running a VM — lower, `print`, compare
-against a readable asm fixture — and the author can read what their function
-became and paste that asm into an `safetynet::asm!` test verbatim when it looks wrong.
-The difference from routing the build through that text is that here the text is
-an observation of the pipeline, not a stage in it.
+The lowerer can still be tested without running a VM — lower, format the graph,
+compare against a readable listing — and the author can read what their function
+became when it looks wrong. The text is an observation of the pipeline, never a
+stage in it.
 
 ---
 
@@ -832,18 +744,14 @@ defense (§R9).
 
 ## 13. Correctness
 
-Four oracles, each catching what the others structurally cannot:
+Three oracles, each catching what the others structurally cannot:
 
 - **Differential harness** — reference vs. VM over random and edge inputs. The
   lowering oracle, blind where §R2 and §R3 say it is blind.
 - **SP validator** — the IR oracle, and since §3.1 also a correctness mechanism
   rather than a check (§R9).
-- **Round-trip** — `parse → Cfg → encode → decode → print → parse` reaching a
-  fixed point (§8.1): the encoding oracle, and §R8's missing property.
-- **Front-end parity** — `parse(print(cfg)) == cfg` over every fixture the lowerer
-  produces. Parity is a *property test, not an architecture* (§R10), and this is
-  what keeps the asm surface from lagging the IR now that the lowerer does not
-  travel through it.
+- **Round-trip** — `decode(encode(x)) == x` over every instruction: the
+  encoding oracle, and §R8's missing property.
 
 Every suite runs under both `Le` and `Be`. Since the order is a literal and not a
 build flag (§3.2), that is *test parameterization*, not a CI matrix: tests are
@@ -854,7 +762,7 @@ random point, and the re-finalized program must produce identical results with
 different displacements. That is the cheap test for the whole displacement
 mechanism, and the one every mutation pass will need (§14).
 
-All four grow at every phase.
+All three grow at every phase.
 
 ---
 
@@ -864,7 +772,7 @@ Passes are `fn(&mut Cfg, &mut Rng)` in `core`, inserted post-validation,
 pre-finalization — one implementation on the shared path, so hand-written and
 compiled programs are mutated by the same code and neither macro needs its own
 hook. The seed comes from `#[safetynet(seed = …)]` or the `.seed` directive, and
-`SN_DUMP_ASM=1` before and after a pass is how a pass gets reviewed.
+`SN_DUMP_IR=1` before and after a pass is how a pass gets reviewed.
 
 The IR's `BlockId` edges and symbolic operands — including symbolic `Local(cell)`
 access, whose displacements do not exist yet (§3.1) — mean passes never touch
@@ -874,7 +782,7 @@ recomputes every displacement against the new SP. What a pass *must* preserve is
 pass, not the build, when it does not. Layout-level obfuscation (block reorder,
 opcode renumbering, frame-cell/const permutation) lives in finalization; semantic
 passes (opaque predicates best value) in the seam. Per-seed differential testing
-is mandatory once this exists, and `safetynet::asm!` disassembly gives each pass a
+is mandatory once this exists, and the graph's `Debug` listing gives each pass a
 readable before/after diff to assert on.
 
 ---
@@ -882,6 +790,12 @@ readable before/after diff to assert on.
 ## 15. Build roadmap
 
 Each phase ends runnable and tested; the two harnesses grow continuously.
+
+> *As built, with one later removal: the `safetynet::asm!` macro-assembler of
+> Phase 3 was retired once `#[safetynet]` became the only front-end. The graph's
+> `Debug` listing (§8.1) keeps the readable form and `SN_DUMP_IR=1` the dump;
+> phase mentions of `asm!`, `print`/`parse` and `SN_DUMP_ASM` below are the plan
+> as it was executed.*
 
 - **Phase 0 — Workspace.** Virtual root over `crates/*`: `safetynet-core`,
   `safetynet-macros`, the `safetynet` façade, and `safetynet-demo` (the binary
@@ -1132,6 +1046,10 @@ happen not to exercise a construct), whereas the handoff could not be. If the
 fixture set is not kept honest, the surface rots anyway — just silently instead of
 loudly.
 
+*Update: settled in the stronger direction — the `asm!` front-end, its parser and
+the printer were removed entirely. The `Cfg`'s `Debug` listing (§8.1) keeps the
+readable form, `SN_DUMP_IR=1` the dump, and nothing parses it.*
+
 ---
 
 ## R8 — Smaller issues
@@ -1147,7 +1065,8 @@ loudly.
   `decode(encode(x)) == x`; a symmetric encoder/decoder bug would pass the
   behavioral diff yet corrupt any future tooling. Phase 3's `safetynet::asm!` plus its
   disassembler replace it permanently, and the fixed-point round-trip is that
-  phase's exit criterion.
+  phase's exit criterion. (Since the assembler's removal the property survives as
+  core's `decode(encode(x)) == x` suite, both orders.)
 - **Three overlapping representations for array-like data** — a `[u8; N]` const
   in `.rodata`, a `Slice { ptr, len }`, and an `Aggregate` — are never unified.
   The example's `KEY`/`CT` indexing works by implication; specify which
