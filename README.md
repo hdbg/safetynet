@@ -17,17 +17,39 @@ The function still behaves identically to callers, and the build validates the V
 
 ## How it works
 
-The eventual surface is a normal Rust function:
+The surface is a normal Rust function — ordinary Rust, the VM invisible here:
 
 ```rust
 #[safetynet]
 fn check(pkt: Packet) -> u32 {
-    // ordinary Rust — the VM is invisible here
+    // Checksum: fold the fields together and clamp the result.
+    let seq: u32 = pkt.seq.typed::<u32>();
+    let len: u32 = pkt.len.typed::<u32>();
+    let mut acc: u32 = seq ^ (len * 2654435761);
+    let mut i: u32 = 0;
+    while i < len {
+        acc = (acc << 1) | (acc >> 31);
+        acc = acc + i;
+        i = i + 1;
+    }
+    acc
 }
 ```
 
 Expanding `#[safetynet]` produces the **replaced function** and the **embedded program** (bytecode plus memory
 image, built at compile time).
+
+## Before and after
+
+The same function, disassembled and drawn as a control-flow graph. On the left,
+compiled straight to ARM64: a handful of blocks that read as what they are. On
+the right, the same logic behind `#[safetynet]` — the native code is now the VM
+interpreter walking an opaque bytecode blob, and the shape of the original
+computation is gone.
+
+| Native | Lowered through `#[safetynet]` |
+| :---: | :---: |
+| ![before](docs/pre.jpeg) | ![after](docs/post.jpeg) |
 
 
 ## Supported Rust subset
