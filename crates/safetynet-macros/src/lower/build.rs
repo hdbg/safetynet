@@ -155,7 +155,7 @@ pub(crate) fn lower(func: &syn::ItemFn) -> syn::Result<Lowered> {
     let entry = builder.block(0);
     let mut lowerer = Lowerer {
         builder,
-        scope,
+        scope: vec![scope],
         bindings,
         loops: Vec::new(),
         field_refs: Vec::new(),
@@ -186,7 +186,10 @@ pub(crate) fn lower(func: &syn::ItemFn) -> syn::Result<Lowered> {
 /// The state threaded through lowering a body.
 struct Lowerer {
     builder: Builder,
-    scope: HashMap<String, Binding>,
+    /// Name resolution, innermost block last: every syntactic block pushes a
+    /// frame and pops it on exit, so a binding lives exactly as long as its
+    /// block. The outermost frame holds the parameters.
+    scope: Vec<HashMap<String, Binding>>,
     /// Types the call site must prove are `VmValue`, appended as locals are
     /// lowered.
     bindings: Vec<syn::Type>,
@@ -204,19 +207,47 @@ impl Lowerer {
     /// Lowers the function body: statements, then a value or a return on every
     /// path.
     fn lower_fn_body(&mut self, block: &syn::Block) -> syn::Result<()> {
-        let stmts = &block.stmts;
-        for (index, stmt) in stmts.iter().enumerate() {
-            let last = index + 1 == stmts.len();
-            let flow = if last {
-                self.lower_tail(stmt)?
-            } else {
-                self.lower_stmt(stmt)?
-            };
-            if flow == Flow::Diverged {
-                return Ok(());
+        self.scoped(|this| {
+            let stmts = &block.stmts;
+            for (index, stmt) in stmts.iter().enumerate() {
+                let last = index + 1 == stmts.len();
+                let flow = if last {
+                    this.lower_tail(stmt)?
+                } else {
+                    this.lower_stmt(stmt)?
+                };
+                if flow == Flow::Diverged {
+                    return Ok(());
+                }
             }
-        }
-        Err(err(block, "the function must end by returning a value"))
+            Err(err(block, "the function must end by returning a value"))
+        })
+    }
+
+    /// Runs `f` inside a fresh scope frame that dies when it returns.
+    fn scoped<T>(&mut self, f: impl FnOnce(&mut Self) -> syn::Result<T>) -> syn::Result<T> {
+        self.scope.push(HashMap::new());
+        let result = f(self);
+        self.scope.pop();
+        result
+    }
+
+    /// The binding `name` resolves to, innermost frame first.
+    fn lookup(&self, name: &str) -> Option<Binding> {
+        self.scope
+            .iter()
+            .rev()
+            .find_map(|frame| frame.get(name))
+            .copied()
+    }
+
+    /// Binds `name` in the innermost frame.
+    fn bind(&mut self, name: String, binding: Binding) -> syn::Result<()> {
+        self.scope
+            .last_mut()
+            .ok_or_else(|| internal_span("no scope frame to bind into"))?
+            .insert(name, binding);
+        Ok(())
     }
 
     /// Lowers the last statement of the function body, where an expression is the
@@ -304,8 +335,7 @@ impl Lowerer {
             .expr;
         self.lower_value(init, scalar)?;
         self.store(cell)?;
-        self.scope.insert(name, Binding::Local { cell, ty: scalar });
-        Ok(())
+        self.bind(name, Binding::Local { cell, ty: scalar })
     }
 
     /// Lowers `x = e`: evaluate `e`, store it into the local `x`.
@@ -338,8 +368,8 @@ impl Lowerer {
             .path
             .get_ident()
             .ok_or_else(|| err(path, "only a local can be assigned to"))?;
-        match self.scope.get(&name.to_string()) {
-            Some(Binding::Local { cell, ty }) => Ok((*cell, *ty)),
+        match self.lookup(&name.to_string()) {
+            Some(Binding::Local { cell, ty }) => Ok((cell, ty)),
             Some(Binding::Param { .. }) => Err(err(name, "a parameter cannot be assigned to")),
             None => Err(err(name, "no such local")),
         }
@@ -412,7 +442,7 @@ impl Lowerer {
             continue_to: head,
             break_to: Some(exit),
         });
-        let flow = self.lower_stmts(&while_expr.body.stmts)?;
+        let flow = self.scoped(|this| this.lower_stmts(&while_expr.body.stmts))?;
         self.loops.pop();
         if flow == Flow::Open {
             self.seal(self.cur, Terminator::Jmp(head))?;
@@ -430,7 +460,11 @@ impl Lowerer {
     fn lower_for(&mut self, for_expr: &syn::ExprForLoop) -> syn::Result<Flow> {
         let (start, end) = range_bounds(for_expr)?;
         let var = for_var(for_expr)?;
-        let scalar = range_scalar(&|name| self.scope.get(name).map(binding_scalar), start, end);
+        let scalar = range_scalar(
+            &|name| self.lookup(name).map(|binding| binding_scalar(&binding)),
+            start,
+            end,
+        );
 
         let i_cell = self
             .builder
@@ -441,20 +475,12 @@ impl Lowerer {
             .cell(scalar.width)
             .ok_or_else(|| err(&for_expr.pat, "the frame is too large"))?;
 
-        // i = start; end = b.
+        // i = start; end = b. Both bounds are evaluated outside the variable's
+        // scope, so `for i in i..n` reads the outer `i`.
         self.lower_expr(start, scalar, 0)?;
         self.store(i_cell)?;
         self.lower_expr(end, scalar, 0)?;
         self.store(end_cell)?;
-        if let Some(name) = var {
-            self.scope.insert(
-                name,
-                Binding::Local {
-                    cell: i_cell,
-                    ty: scalar,
-                },
-            );
-        }
 
         let head = self.builder.block(0);
         self.seal(self.cur, Terminator::Jmp(head))?;
@@ -479,7 +505,18 @@ impl Lowerer {
             continue_to: incr,
             break_to: Some(exit),
         });
-        let flow = self.lower_stmts(&for_expr.body.stmts)?;
+        let flow = self.scoped(|this| {
+            if let Some(name) = var {
+                this.bind(
+                    name,
+                    Binding::Local {
+                        cell: i_cell,
+                        ty: scalar,
+                    },
+                )?;
+            }
+            this.lower_stmts(&for_expr.body.stmts)
+        })?;
         self.loops.pop();
         if flow == Flow::Open {
             self.seal(self.cur, Terminator::Jmp(incr))?;
@@ -507,7 +544,7 @@ impl Lowerer {
             continue_to: head,
             break_to: None,
         });
-        let flow = self.lower_stmts(&loop_expr.body.stmts)?;
+        let flow = self.scoped(|this| this.lower_stmts(&loop_expr.body.stmts))?;
         let broke = self.loops.pop().and_then(|ctx| ctx.break_to);
         if flow == Flow::Open {
             self.seal(self.cur, Terminator::Jmp(head))?;
@@ -538,7 +575,7 @@ impl Lowerer {
                 },
             )?;
             self.cur = then_id;
-            if self.lower_stmts(&if_expr.then_branch.stmts)? == Flow::Open {
+            if self.scoped(|this| this.lower_stmts(&if_expr.then_branch.stmts))? == Flow::Open {
                 self.seal(self.cur, Terminator::Jmp(join))?;
             }
             self.cur = join;
@@ -555,8 +592,9 @@ impl Lowerer {
         )?;
 
         self.cur = then_id;
-        let then_exit =
-            (self.lower_stmts(&if_expr.then_branch.stmts)? == Flow::Open).then_some(self.cur);
+        let then_exit = (self.scoped(|this| this.lower_stmts(&if_expr.then_branch.stmts))?
+            == Flow::Open)
+            .then_some(self.cur);
 
         self.cur = else_id;
         let else_exit = (self.lower_else_stmt(else_expr)? == Flow::Open).then_some(self.cur);
@@ -577,7 +615,9 @@ impl Lowerer {
     /// Lowers the `else` of a statement `if`: another block, or an `else if`.
     fn lower_else_stmt(&mut self, else_expr: &syn::Expr) -> syn::Result<Flow> {
         match else_expr {
-            syn::Expr::Block(block) => self.lower_stmts(&block.block.stmts),
+            syn::Expr::Block(block) => {
+                self.scoped(|this| this.lower_stmts(&block.block.stmts))
+            }
             syn::Expr::If(if_expr) => self.lower_if_stmt(if_expr),
             other => Err(err(other, "an `else` must be a block or another `if`")),
         }
@@ -640,20 +680,24 @@ impl Lowerer {
         let Some((last, rest)) = block.stmts.split_last() else {
             return Err(err(block, "a block used as a value must produce one"));
         };
-        if self.lower_stmts(rest)? == Flow::Diverged {
-            return Ok(Value::Diverged);
-        }
-        match last {
-            syn::Stmt::Expr(syn::Expr::Return(ret), _) => {
-                self.lower_return(ret)?;
-                Ok(Value::Diverged)
+        self.scoped(|this| {
+            if this.lower_stmts(rest)? == Flow::Diverged {
+                return Ok(Value::Diverged);
             }
-            syn::Stmt::Expr(expr, None) => Ok(Value::Produced(self.lower_value(expr, expected)?)),
-            other => Err(err(
-                other,
-                "a block used as a value must end with an expression",
-            )),
-        }
+            match last {
+                syn::Stmt::Expr(syn::Expr::Return(ret), _) => {
+                    this.lower_return(ret)?;
+                    Ok(Value::Diverged)
+                }
+                syn::Stmt::Expr(expr, None) => {
+                    Ok(Value::Produced(this.lower_value(expr, expected)?))
+                }
+                other => Err(err(
+                    other,
+                    "a block used as a value must end with an expression",
+                )),
+            }
+        })
     }
 
     /// Lowers an expression in a value position, where an `if` may itself be the
@@ -741,7 +785,7 @@ impl Lowerer {
             .path
             .get_ident()
             .ok_or_else(|| err(path, "expected a parameter or local"))?;
-        match self.scope.get(&name.to_string()).copied() {
+        match self.lookup(&name.to_string()) {
             Some(Binding::Param { offset, ty }) => {
                 self.push_base(Region::Input)?;
                 if offset != 0 {
@@ -881,8 +925,8 @@ impl Lowerer {
         match expr {
             syn::Expr::Path(path) => {
                 let name = path.path.get_ident()?;
-                Some(match self.scope.get(&name.to_string())? {
-                    Binding::Param { ty, .. } | Binding::Local { ty, .. } => *ty,
+                Some(match self.lookup(&name.to_string())? {
+                    Binding::Param { ty, .. } | Binding::Local { ty, .. } => ty,
                 })
             }
             syn::Expr::Paren(paren) => self.peek(&paren.expr),
