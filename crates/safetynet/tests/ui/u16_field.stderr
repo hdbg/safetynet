@@ -1,0 +1,5 @@
+error: a field must be a scalar the machine can load
+  --> tests/ui/u16_field.rs:10:5
+   |
+10 |     f.len == 0
+   |     ^^^^^
