@@ -89,12 +89,7 @@ pub(crate) fn emit_artifact(
         Order::Le => push32_immediate(&Packed::<Le>::new()),
         Order::Be => push32_immediate(&Packed::<Be>::new()),
     };
-    let missing = || {
-        syn::Error::new(
-            order.span(),
-            "the encoder has no push32 immediate to patch",
-        )
-    };
+    let missing = || syn::Error::new(order.span(), "the encoder has no push32 immediate to patch");
     let at_of = |imm: &safetynet_core::Immediate, index: usize| {
         Literal::usize_suffixed(offsets.get(index).copied().unwrap_or_default() + imm.at)
     };

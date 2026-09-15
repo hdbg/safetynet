@@ -1094,7 +1094,11 @@ impl Lowerer {
     /// Puts a freshly loaded value at rest: loads zero-extend, which is a
     /// narrow signed type's resting form only after sign-extension.
     fn normalize_load(&mut self, ty: Scalar) -> syn::Result<()> {
-        if ty.signed { self.normalize(ty) } else { Ok(()) }
+        if ty.signed {
+            self.normalize(ty)
+        } else {
+            Ok(())
+        }
     }
 
     /// Restores a value's resting form: the machine computes at the word

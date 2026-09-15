@@ -63,7 +63,10 @@ fn a_local_lives_in_a_frame_cell() {
 #[test]
 fn a_wider_parameter_reads_at_its_width() {
     let cfg = graph("fn id(x: u64) -> u64 { x }");
-    assert_eq!(format!("{cfg:?}"), "b0:\n    $push .input\n    ld64\n    halt\n");
+    assert_eq!(
+        format!("{cfg:?}"),
+        "b0:\n    $push .input\n    ld64\n    halt\n"
+    );
     assert_resolves(&cfg);
 }
 
@@ -216,9 +219,7 @@ fn a_labeled_continue_reaches_the_named_loop() {
 
 #[test]
 fn an_unknown_label_is_refused() {
-    assert!(
-        refusal("fn f() -> u32 { 'a: loop { break 'b; } }").contains("no enclosing loop"),
-    );
+    assert!(refusal("fn f() -> u32 { 'a: loop { break 'b; } }").contains("no enclosing loop"),);
 }
 
 #[test]

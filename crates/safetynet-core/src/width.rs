@@ -24,7 +24,7 @@ impl Width {
             Self::U64 => 8,
         }
     }
-    
+
     /// The width in bits: 8, 32 or 64.
     pub const fn bits(self) -> u16 {
         self.bytes() * 8

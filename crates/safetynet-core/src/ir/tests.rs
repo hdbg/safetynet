@@ -70,7 +70,6 @@ fn every_shape() -> Cfg {
     builder.build(at(1)).expect("builds")
 }
 
-
 #[test]
 fn a_graph_debugs_as_an_assembly_listing() {
     assert_eq!(
@@ -253,7 +252,6 @@ fn a_terminator_names_every_block_it_can_reach() {
         [c, a, b]
     );
 }
-
 
 /// A loop needs to name a block that does not exist yet, which is the reason
 /// ids are handed out before bodies are written.
