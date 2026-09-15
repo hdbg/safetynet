@@ -220,3 +220,21 @@ fn an_unknown_label_is_refused() {
         refusal("fn f() -> u32 { 'a: loop { break 'b; } }").contains("no enclosing loop"),
     );
 }
+
+#[test]
+fn a_suffixed_range_keeps_its_width() {
+    let cfg = graph(
+        "fn f() -> u64 { let mut c: u64 = 0; for _ in 4294967296u64..4294967299u64 { c += 1; } c }",
+    );
+    // Both bounds live in word cells, so nothing truncates.
+    assert!(format!("{cfg:?}").starts_with(".frame { c0: u64, c1: u64, c2: u64 }\n"));
+    assert_resolves(&cfg);
+}
+
+#[test]
+fn an_unsupported_range_suffix_is_refused() {
+    assert!(
+        refusal("fn f() -> u32 { let mut c: u32 = 0; for _ in 0u16..9u16 { c += 1; } c }")
+            .contains("scalar the machine can hold")
+    );
+}

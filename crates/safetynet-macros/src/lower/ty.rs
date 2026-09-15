@@ -30,8 +30,12 @@ impl Scalar {
     /// There is no two-byte access, so `u16`/`i16` are declined rather than
     /// silently widened.
     pub(crate) fn of(ty: &syn::Type) -> Option<Self> {
-        let name = ident(ty)?;
-        Some(match name.as_str() {
+        Self::of_name(&ident(ty)?)
+    }
+
+    /// The scalar a bare name — a type ident, a literal suffix — denotes.
+    pub(crate) fn of_name(name: &str) -> Option<Self> {
+        Some(match name {
             "u8" => Self {
                 width: Width::U8,
                 signed: false,

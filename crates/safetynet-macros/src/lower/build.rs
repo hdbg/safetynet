@@ -481,6 +481,20 @@ impl Lowerer {
         Ok(Flow::Open)
     }
 
+    /// The scalar a `for` range runs over: a typed bound wins, then a literal
+    /// suffix, then the `i32` a bare literal defaults to — the same default the
+    /// reference copy's inference lands on, whose `overflowing_literals` check
+    /// keeps honest.
+    fn range_scalar(&self, start: &syn::Expr, end: &syn::Expr) -> syn::Result<Scalar> {
+        if let Some(scalar) = self.peek(start).or_else(|| self.peek(end)) {
+            return Ok(scalar);
+        }
+        match suffix_scalar(start).or_else(|| suffix_scalar(end)) {
+            Some(result) => result,
+            None => Ok(Scalar::I32),
+        }
+    }
+
     /// Lowers `for i in a..b { body }` as a counted loop.
     ///
     /// The end bound is snapshotted so mutating it in the body cannot change the
@@ -488,11 +502,7 @@ impl Lowerer {
     fn lower_for(&mut self, for_expr: &syn::ExprForLoop) -> syn::Result<Flow> {
         let (start, end) = range_bounds(for_expr)?;
         let var = for_var(for_expr)?;
-        let scalar = range_scalar(
-            &|name| self.lookup(name).map(|binding| binding_scalar(&binding)),
-            start,
-            end,
-        );
+        let scalar = self.range_scalar(start, end)?;
 
         let i_cell = self
             .builder
@@ -1267,32 +1277,17 @@ fn field_path(field: &syn::ExprField) -> syn::Result<(String, Vec<syn::Ident>)> 
     }
 }
 
-/// The scalar a binding carries.
-fn binding_scalar(binding: &Binding) -> Scalar {
-    match binding {
-        Binding::Param { ty, .. } | Binding::Local { ty, .. } => *ty,
-    }
-}
-
 /// The element type of a `for` range: whichever bound names a type, else `i32`.
-fn range_scalar(
-    lookup: &dyn Fn(&str) -> Option<Scalar>,
-    start: &syn::Expr,
-    end: &syn::Expr,
-) -> Scalar {
-    bound_scalar(lookup, start)
-        .or_else(|| bound_scalar(lookup, end))
-        .unwrap_or(Scalar::I32)
-}
-
-/// The type of a range bound, when it plainly names a parameter or local.
-fn bound_scalar(lookup: &dyn Fn(&str) -> Option<Scalar>, expr: &syn::Expr) -> Option<Scalar> {
+/// The scalar a literal bound's suffix spells, if it has one.
+fn suffix_scalar(expr: &syn::Expr) -> Option<syn::Result<Scalar>> {
     match expr {
-        syn::Expr::Path(path) => path
-            .path
-            .get_ident()
-            .and_then(|name| lookup(&name.to_string())),
-        syn::Expr::Paren(paren) => bound_scalar(lookup, &paren.expr),
+        syn::Expr::Paren(paren) => suffix_scalar(&paren.expr),
+        syn::Expr::Lit(syn::ExprLit {
+            lit: syn::Lit::Int(int),
+            ..
+        }) if !int.suffix().is_empty() => Some(Scalar::of_name(int.suffix()).ok_or_else(|| {
+            err(int, "the range's type is not a scalar the machine can hold")
+        })),
         _ => None,
     }
 }
