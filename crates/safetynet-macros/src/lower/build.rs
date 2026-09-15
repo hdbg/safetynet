@@ -21,7 +21,7 @@ use safetynet_core::isa::{
 };
 use safetynet_core::{Instr, Region, WORD_SIZE, Width};
 
-use super::ty::Scalar;
+use super::ty::{self, Scalar};
 use crate::backend::FieldRef;
 
 
@@ -134,6 +134,12 @@ pub(crate) fn lower(func: &syn::ItemFn) -> syn::Result<Lowered> {
                 scope.insert(name, Binding::Param { offset, ty: scalar });
                 offset += scalar.size();
                 bindings.push(ty_node.clone());
+            }
+            None if ty::unsupported_primitive(ty_node) => {
+                return Err(err(
+                    ty_node,
+                    "a parameter must be a scalar the machine can hold",
+                ));
             }
             None => {
                 aggregate = Some((name, ty_node.clone()));

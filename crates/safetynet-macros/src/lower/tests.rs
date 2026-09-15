@@ -238,3 +238,9 @@ fn an_unsupported_range_suffix_is_refused() {
             .contains("scalar the machine can hold")
     );
 }
+
+#[test]
+fn an_unsupported_primitive_parameter_is_refused() {
+    assert!(refusal("fn f(x: u16) -> u32 { 7 }").contains("machine can hold"));
+    assert!(refusal("fn f(x: f64) -> u32 { 7 }").contains("machine can hold"));
+}

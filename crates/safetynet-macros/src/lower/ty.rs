@@ -76,6 +76,15 @@ impl Scalar {
     }
 }
 
+/// A primitive name the machine cannot hold, to decline rather than route to
+/// the aggregate path a struct type takes.
+pub(crate) fn unsupported_primitive(ty: &syn::Type) -> bool {
+    matches!(
+        ident(ty).as_deref(),
+        Some("u16" | "i16" | "u128" | "i128" | "usize" | "isize" | "f32" | "f64" | "char")
+    )
+}
+
 /// The single identifier a plain type path names, if that is all it is.
 fn ident(ty: &syn::Type) -> Option<String> {
     match ty {
