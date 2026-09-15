@@ -4,6 +4,39 @@
 //! representation, compiled to bytecode, and its body replaced with a call into
 //! the VM interpreter.
 //!
+//! # Usage
+//!
+//! Tag a function with [`safetynet`] and it keeps its signature, so callers see
+//! an ordinary function — but its body now runs on the VM over bytecode built
+//! at compile time. A struct argument derives [`VmLayout`]; each field names
+//! its type with [`Typed::typed`] the first time it is read.
+//!
+//! ```
+//! use safetynet::{Typed, VmLayout, safetynet};
+//!
+//! #[derive(Clone, Copy, VmLayout)]
+//! struct Packet {
+//!     seq: u32,
+//!     len: u32,
+//! }
+//!
+//! #[safetynet]
+//! fn checksum(pkt: Packet) -> u32 {
+//!     let seq: u32 = pkt.seq.typed::<u32>();
+//!     let len: u32 = pkt.len.typed::<u32>();
+//!     let mut acc: u32 = seq ^ len;
+//!     let mut i: u32 = 0;
+//!     while i < len {
+//!         acc = acc + i;
+//!         i = i + 1;
+//!     }
+//!     acc
+//! }
+//!
+//! // Called like any other function; the checksum runs on the VM.
+//! assert_eq!(checksum(Packet { seq: 7, len: 4 }), 9);
+//! ```
+//!
 //! # Byte order
 //!
 //! Multi-byte values in the VM image are laid out in a byte order fixed at
