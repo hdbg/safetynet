@@ -19,13 +19,11 @@ use safetynet_core::isa::{
     Add, And, BitNot, CmpEq, CmpLe, CmpLt, CmpSLe, CmpSLt, Div, Ld8, Ld32, Ld64, Mul, Or, Push8,
     Push32, Push64, Rem, SDiv, SRem, Sar, Shl, Shr, Sub, Xor,
 };
-use safetynet_core::{Instr, Region, Width};
+use safetynet_core::{Instr, Region, WORD_SIZE, Width};
 
 use super::ty::Scalar;
 use crate::backend::FieldRef;
 
-/// One word on the operand stack, in bytes: the depth a produced value adds.
-const WORD: u32 = 8;
 
 /// A function lowered to its graph, with what the wrapper needs to marshal for
 /// it and the binding types the call site must still prove are `VmValue`.
@@ -406,7 +404,7 @@ impl Lowerer {
         let op = compound(&binary.op).ok_or_else(|| err(binary, "not a compound assignment"))?;
         let (cell, ty) = self.assign_target(&binary.left)?;
         self.load(cell)?;
-        let right = self.lower_expr(&binary.right, ty, WORD)?;
+        let right = self.lower_expr(&binary.right, ty, WORD_SIZE as u32)?;
         if right.width != ty.width {
             return Err(err(binary, "the operands must be the same width"));
         }
@@ -699,7 +697,7 @@ impl Lowerer {
         match (then_exit, else_exit) {
             (None, None) => Ok(Value::Diverged),
             _ => {
-                let join = self.builder.block(WORD);
+                let join = self.builder.block(WORD_SIZE as u32);
                 let mut ty = None;
                 for (block, scalar) in [then_exit, else_exit].into_iter().flatten() {
                     self.seal(block, Terminator::Jmp(join))?;
@@ -856,7 +854,7 @@ impl Lowerer {
             // Negation is `0 - x`, which the wrapping subtraction handles.
             syn::UnOp::Neg(_) => {
                 self.push_word(0)?;
-                let ty = self.lower_expr(&unary.expr, expected, depth + WORD)?;
+                let ty = self.lower_expr(&unary.expr, expected, depth + WORD_SIZE as u32)?;
                 self.push_instr(Sub)?;
                 Ok(ty)
             }
@@ -911,7 +909,7 @@ impl Lowerer {
             (&*binary.left, &*binary.right)
         };
         let left = self.lower_expr(first, operand, depth)?;
-        let right = self.lower_expr(second, operand, depth + WORD)?;
+        let right = self.lower_expr(second, operand, depth + WORD_SIZE as u32)?;
         if left.width != right.width {
             return Err(err(binary, "the operands must be the same width"));
         }
@@ -931,7 +929,7 @@ impl Lowerer {
         self.lower_expr(&binary.left, Scalar::BOOL, depth)?;
         let rhs = self.builder.block(depth);
         let shortcut = self.builder.block(depth);
-        let join = self.builder.block(depth + WORD);
+        let join = self.builder.block(depth + WORD_SIZE as u32);
 
         // `&&` runs the right side when the left is true; `||`, when it is false.
         let branch = if is_and {
