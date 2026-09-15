@@ -56,8 +56,10 @@ enum Binding {
     Local { cell: CellId, ty: Scalar },
 }
 
-/// The blocks a `break` and a `continue` jump to for the enclosing loop.
+/// The blocks a `break` and a `continue` jump to for one enclosing loop.
 struct Loop {
+    /// The loop's label, without its tick.
+    label: Option<String>,
     /// Where `continue` goes: a `while`'s head, a `loop`'s body.
     continue_to: BlockId,
     /// Where `break` goes, created on the first one a `loop` needs.
@@ -393,17 +395,14 @@ impl Lowerer {
         if brk.expr.is_some() {
             return Err(err(brk, "`break` with a value is not supported yet"));
         }
-        let existing = self
-            .loops
-            .last()
-            .ok_or_else(|| err(brk, "`break` outside a loop"))?
-            .break_to;
+        let index = self.target_loop(brk.label.as_ref(), brk, "`break` outside a loop")?;
+        let existing = self.loops.get(index).and_then(|target| target.break_to);
         let exit = match existing {
             Some(exit) => exit,
             None => {
                 let exit = self.builder.block(0);
-                if let Some(top) = self.loops.last_mut() {
-                    top.break_to = Some(exit);
+                if let Some(target) = self.loops.get_mut(index) {
+                    target.break_to = Some(exit);
                 }
                 exit
             }
@@ -412,15 +411,40 @@ impl Lowerer {
         Ok(Flow::Diverged)
     }
 
-    /// Lowers `continue`, jumping to the enclosing loop's head.
+    /// Lowers `continue`, jumping to its loop's head.
     fn lower_continue(&mut self, cont: &syn::ExprContinue) -> syn::Result<Flow> {
+        let index = self.target_loop(cont.label.as_ref(), cont, "`continue` outside a loop")?;
         let head = self
             .loops
-            .last()
+            .get(index)
             .ok_or_else(|| err(cont, "`continue` outside a loop"))?
             .continue_to;
         self.seal(self.cur, Terminator::Jmp(head))?;
         Ok(Flow::Diverged)
+    }
+
+    /// The loop a `break` or `continue` targets: the innermost one, or the
+    /// innermost carrying the named label.
+    fn target_loop<T: ToTokens>(
+        &self,
+        label: Option<&syn::Lifetime>,
+        node: T,
+        outside: &str,
+    ) -> syn::Result<usize> {
+        match label {
+            None => self
+                .loops
+                .len()
+                .checked_sub(1)
+                .ok_or_else(|| err(node, outside)),
+            Some(lifetime) => {
+                let name = lifetime.ident.to_string();
+                self.loops
+                    .iter()
+                    .rposition(|target| target.label.as_deref() == Some(&name))
+                    .ok_or_else(|| err(lifetime, "no enclosing loop has this label"))
+            }
+        }
     }
 
     /// Lowers `while cond { body }`.
@@ -442,6 +466,7 @@ impl Lowerer {
 
         self.cur = body;
         self.loops.push(Loop {
+            label: loop_label(&while_expr.label),
             continue_to: head,
             break_to: Some(exit),
         });
@@ -505,6 +530,7 @@ impl Lowerer {
 
         self.cur = body;
         self.loops.push(Loop {
+            label: loop_label(&for_expr.label),
             continue_to: incr,
             break_to: Some(exit),
         });
@@ -544,6 +570,7 @@ impl Lowerer {
         self.cur = head;
 
         self.loops.push(Loop {
+            label: loop_label(&loop_expr.label),
             continue_to: head,
             break_to: None,
         });
@@ -1200,6 +1227,11 @@ fn typed_argument(call: &syn::ExprMethodCall) -> Option<&syn::Type> {
         Some(syn::GenericArgument::Type(ty)) if turbofish.args.len() == 1 => Some(ty),
         _ => None,
     }
+}
+
+/// The name of a loop's label, without its tick.
+fn loop_label(label: &Option<syn::Label>) -> Option<String> {
+    label.as_ref().map(|label| label.name.ident.to_string())
 }
 
 /// A field path's map key: its dotted spelling.

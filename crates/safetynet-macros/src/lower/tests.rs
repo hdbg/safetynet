@@ -199,3 +199,24 @@ fn a_conflicting_field_type_is_refused() {
 fn a_missing_turbofish_is_refused() {
     assert!(refusal("fn f(p: Packet) -> u32 { p.seq.typed() }").contains("needs the type"));
 }
+
+#[test]
+fn a_labeled_break_leaves_the_named_loop() {
+    assert_resolves(&graph(
+        "fn f(n: u64) -> u64 { let mut c: u64 = 0; 'outer: loop { loop { c += 1; if c % 2 == 0 { break; } if c >= n { break 'outer; } } } c }",
+    ));
+}
+
+#[test]
+fn a_labeled_continue_reaches_the_named_loop() {
+    assert_resolves(&graph(
+        "fn f(n: u32) -> u32 { let mut i: u32 = 0; 'outer: while i < n { i += 1; loop { continue 'outer; } } i }",
+    ));
+}
+
+#[test]
+fn an_unknown_label_is_refused() {
+    assert!(
+        refusal("fn f() -> u32 { 'a: loop { break 'b; } }").contains("no enclosing loop"),
+    );
+}
