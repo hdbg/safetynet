@@ -56,8 +56,14 @@ fn doubled(x: u32) -> u32 {
 fn __sn_program_doubled() -> ::safetynet::Artifact<::safetynet::Le> {
     {
         const CODE: &[u8] = &::safetynet::link::<
-            10,
-        >([2u8, 0u8, 0u8, 0u8, 0u8, 14u8, 1u8, 2u8, 21u8, 0u8], &[]);
+            16,
+        >(
+            [
+                2u8, 0u8, 0u8, 0u8, 0u8, 14u8, 1u8, 2u8, 21u8, 2u8, 255u8, 255u8, 255u8,
+                255u8, 26u8, 0u8,
+            ],
+            &[],
+        );
         ::safetynet::Artifact::<
             ::safetynet::Le,
         >::new(

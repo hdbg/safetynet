@@ -35,7 +35,7 @@ fn a_parameter_is_read_from_the_input() {
     let cfg = graph("fn inc(x: u32) -> u32 { x + 1 }");
     assert_eq!(
         format!("{cfg:?}"),
-        "b0:\n    $push .input\n    ld32\n    push8 1\n    add\n    halt\n"
+        "b0:\n    $push .input\n    ld32\n    push8 1\n    add\n    push32 4294967295\n    and\n    halt\n"
     );
     assert_resolves(&cfg);
 }
@@ -55,7 +55,7 @@ fn a_local_lives_in_a_frame_cell() {
     let cfg = graph("fn add2(a: u32, b: u32) -> u32 { let s: u32 = a + b; s }");
     assert_eq!(
         format!("{cfg:?}"),
-        ".frame { c0: u32 }\nb0:\n    $push .input\n    ld32\n    $push .input\n    push8 4\n    add\n    ld32\n    add\n    $store c0\n    $load c0\n    halt\n"
+        ".frame { c0: u32 }\nb0:\n    $push .input\n    ld32\n    $push .input\n    push8 4\n    add\n    ld32\n    add\n    push32 4294967295\n    and\n    $store c0\n    $load c0\n    halt\n"
     );
     assert_resolves(&cfg);
 }

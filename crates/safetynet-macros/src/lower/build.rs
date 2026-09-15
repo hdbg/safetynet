@@ -19,11 +19,10 @@ use safetynet_core::isa::{
     Add, And, BitNot, CmpEq, CmpLe, CmpLt, CmpSLe, CmpSLt, Div, Ld8, Ld32, Ld64, Mul, Or, Push8,
     Push32, Push64, Rem, SDiv, SRem, Sar, Shl, Shr, Sub, Xor,
 };
-use safetynet_core::{Instr, Region, WORD_SIZE, Width};
+use safetynet_core::{Instr, Region, WORD_SIZE, Width, Word};
 
 use super::ty::{self, Scalar};
 use crate::backend::FieldRef;
-
 
 /// A function lowered to its graph, with what the wrapper needs to marshal for
 /// it and the binding types the call site must still prove are `VmValue`.
@@ -361,6 +360,7 @@ impl Lowerer {
         let op = compound(&binary.op).ok_or_else(|| err(binary, "not a compound assignment"))?;
         let (cell, ty) = self.assign_target(&binary.left)?;
         self.load(cell)?;
+        self.normalize_load(ty)?;
         let right = self.lower_expr(&binary.right, ty, WORD_SIZE as u32)?;
         if right.width != ty.width {
             return Err(err(binary, "the operands must be the same width"));
@@ -530,7 +530,9 @@ impl Lowerer {
         self.seal(self.cur, Terminator::Jmp(head))?;
         self.cur = head;
         self.load(i_cell)?;
+        self.normalize_load(scalar)?;
         self.load(end_cell)?;
+        self.normalize_load(scalar)?;
         self.push_instr(signed(scalar, CmpSLt.into(), CmpLt.into()))?;
 
         let body = self.builder.block(0);
@@ -661,9 +663,7 @@ impl Lowerer {
     /// Lowers the `else` of a statement `if`: another block, or an `else if`.
     fn lower_else_stmt(&mut self, else_expr: &syn::Expr) -> syn::Result<Flow> {
         match else_expr {
-            syn::Expr::Block(block) => {
-                self.scoped(|this| this.lower_stmts(&block.block.stmts))
-            }
+            syn::Expr::Block(block) => self.scoped(|this| this.lower_stmts(&block.block.stmts)),
             syn::Expr::If(if_expr) => self.lower_if_stmt(if_expr),
             other => Err(err(other, "an `else` must be a block or another `if`")),
         }
@@ -778,9 +778,7 @@ impl Lowerer {
             syn::Expr::Paren(paren) => self.lower_expr(&paren.expr, expected, depth),
             syn::Expr::Unary(unary) => self.lower_unary(unary, expected, depth),
             syn::Expr::Binary(binary) => self.lower_binary(binary, expected, depth),
-            syn::Expr::MethodCall(call) if call.method == "typed" => {
-                self.lower_field_typed(call)
-            }
+            syn::Expr::MethodCall(call) if call.method == "typed" => self.lower_field_typed(call),
             syn::Expr::Field(field) => self.lower_field_known(field),
             other => Err(err(other, "this expression is not supported yet")),
         }
@@ -806,9 +804,8 @@ impl Lowerer {
         }
         let ty = typed_argument(call)
             .ok_or_else(|| err(call, "`.typed()` needs the type: `.typed::<u32>()`"))?;
-        let scalar = Scalar::of(ty).ok_or_else(|| {
-            err(ty, "a field must be typed as a scalar the machine can hold")
-        })?;
+        let scalar = Scalar::of(ty)
+            .ok_or_else(|| err(ty, "a field must be typed as a scalar the machine can hold"))?;
 
         let (_, path) = field_path(field)?;
         let key = field_key(&path);
@@ -868,6 +865,7 @@ impl Lowerer {
         self.body()?.field(hole);
         self.push_instr(Add)?;
         self.body()?.load_field(hole);
+        self.normalize_load(scalar)?;
         Ok(scalar)
     }
 
@@ -901,10 +899,12 @@ impl Lowerer {
                     self.push_instr(Add)?;
                 }
                 self.push_instr(load(ty.width))?;
+                self.normalize_load(ty)?;
                 Ok(ty)
             }
             Some(Binding::Local { cell, ty }) => {
                 self.load(cell)?;
+                self.normalize_load(ty)?;
                 Ok(ty)
             }
             None => Err(err(name, "no such parameter or local")),
@@ -924,6 +924,7 @@ impl Lowerer {
                 self.push_word(0)?;
                 let ty = self.lower_expr(&unary.expr, expected, depth + WORD_SIZE as u32)?;
                 self.push_instr(Sub)?;
+                self.normalize(ty)?;
                 Ok(ty)
             }
             syn::UnOp::Not(_) => {
@@ -935,6 +936,7 @@ impl Lowerer {
                     Ok(Scalar::BOOL)
                 } else {
                     self.push_instr(BitNot)?;
+                    self.normalize(ty)?;
                     Ok(ty)
                 }
             }
@@ -1085,7 +1087,35 @@ impl Lowerer {
                 return Ok(Scalar::BOOL);
             }
         }
+        self.normalize(ty)?;
         Ok(ty)
+    }
+
+    /// Puts a freshly loaded value at rest: loads zero-extend, which is a
+    /// narrow signed type's resting form only after sign-extension.
+    fn normalize_load(&mut self, ty: Scalar) -> syn::Result<()> {
+        if ty.signed { self.normalize(ty) } else { Ok(()) }
+    }
+
+    /// Restores a value's resting form: the machine computes at the word
+    /// width, so a narrow result is masked back down when unsigned and
+    /// sign-extended when signed. Word-wide values already rest as they are.
+    fn normalize(&mut self, ty: Scalar) -> syn::Result<()> {
+        if ty.width == Width::U64 {
+            return Ok(());
+        }
+        let bits = Word::from(ty.width.bits());
+        if ty.signed {
+            let shift = (WORD_SIZE as u64) * 8 - bits;
+            self.push_word(shift)?;
+            self.push_instr(Shl)?;
+            self.push_word(shift)?;
+            self.push_instr(Sar)?;
+        } else {
+            self.push_word(Word::MAX >> (64 - bits))?;
+            self.push_instr(And)?;
+        }
+        Ok(())
     }
 
     /// Emits a comparison, which always yields a boolean.
@@ -1291,9 +1321,10 @@ fn suffix_scalar(expr: &syn::Expr) -> Option<syn::Result<Scalar>> {
         syn::Expr::Lit(syn::ExprLit {
             lit: syn::Lit::Int(int),
             ..
-        }) if !int.suffix().is_empty() => Some(Scalar::of_name(int.suffix()).ok_or_else(|| {
-            err(int, "the range's type is not a scalar the machine can hold")
-        })),
+        }) if !int.suffix().is_empty() => Some(
+            Scalar::of_name(int.suffix())
+                .ok_or_else(|| err(int, "the range's type is not a scalar the machine can hold")),
+        ),
         _ => None,
     }
 }

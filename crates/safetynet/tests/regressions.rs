@@ -149,3 +149,36 @@ fn a_narrow_not_stays_at_its_width() {
     assert!(inverted_matches(0xF));
     assert!(!inverted_matches(0));
 }
+
+#[safetynet]
+fn negation_matches(a: i32, b: i32) -> bool {
+    -a == b
+}
+
+#[safetynet]
+fn narrow_less(a: i32, b: i32) -> bool {
+    a < b
+}
+
+#[safetynet]
+fn narrow_halved(x: i32) -> i32 {
+    x / 2
+}
+
+#[test]
+fn a_narrow_negation_stays_at_its_width() {
+    assert!(negation_matches(5, -5));
+    assert!(!negation_matches(5, 5));
+}
+
+#[test]
+fn a_narrow_signed_comparison_respects_the_sign() {
+    assert!(narrow_less(-1, 1));
+    assert!(!narrow_less(1, -1));
+}
+
+#[test]
+fn a_narrow_signed_division_rounds_toward_zero() {
+    assert_eq!(narrow_halved(-10), -5);
+    assert_eq!(narrow_halved(10), 5);
+}
