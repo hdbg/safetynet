@@ -54,6 +54,12 @@ impl BlockBody {
         self
     }
 
+    /// Appends the number of bytes a region holds.
+    pub fn len(&mut self, region: Region) -> &mut Self {
+        self.code.push(Item::Len(region));
+        self
+    }
+
     /// Appends a field-offset hole, named by `hole`.
     pub fn field(&mut self, hole: u32) -> &mut Self {
         self.code.push(Item::Field(hole));

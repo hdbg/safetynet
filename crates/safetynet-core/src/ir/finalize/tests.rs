@@ -497,6 +497,37 @@ fn resolving_is_independent_of_any_layout() {
     assert_eq!(resolve(&adds_two()).expect("resolves").code(), none.code());
 }
 
+/// A region's length resolves like its base: a placeholder push and a
+/// relocation, filled from the layout the host chose.
+#[test]
+fn a_relocation_fills_in_the_region_length() {
+    let mut builder = Cfg::builder(Frame::new());
+    let entry = builder.block(0);
+    builder.at(entry).expect("open").len(Region::Input);
+    builder.seal(entry, Terminator::Halt).expect("seals");
+    let cfg = builder.build(entry).expect("builds");
+
+    let resolved = resolve(&cfg).expect("resolves");
+    assert_eq!(
+        resolved.len_relocs(),
+        [LenReloc {
+            index: 0,
+            region: Region::Input,
+        }]
+    );
+    assert_eq!(resolved.code().first(), Some(&Push32 { imm: 0 }.into()));
+
+    let layout = layout(1024);
+    let program = assemble::<Le>(&cfg)
+        .expect("assembles")
+        .finalize(&layout)
+        .expect("finalizes");
+    match first::<Le>(program.code()) {
+        Instr::Push32(op) => assert_eq!(op.imm, layout.span(Region::Input).len()),
+        other => panic!("expected a length push, got {other:?}"),
+    }
+}
+
 /// The relocation is what turns a placeholder push into the region's real base.
 #[test]
 fn a_relocation_fills_in_the_region_base() {

@@ -209,7 +209,19 @@ fn symbolic_items_declare_their_stack_effect() {
 
     assert_eq!(Item::Load(cell).sp_delta(), 8, "a load pushes a word");
     assert_eq!(Item::Store(cell).sp_delta(), -8, "a store pops one");
+    assert_eq!(Item::Len(Region::Input).sp_delta(), 8, "a length is a word");
     assert_eq!(Item::from(Instr::from(Add)).sp_delta(), Add.sp_delta());
+}
+
+/// A region's length lists like its base, by the region's name.
+#[test]
+fn a_region_length_lists_by_name() {
+    let mut builder = Cfg::builder(Frame::new());
+    let entry = builder.block(0);
+    builder.at(entry).expect("open").len(Region::Input);
+    builder.seal(entry, Terminator::Halt).expect("seals");
+    let cfg = builder.build(entry).expect("builds");
+    assert_eq!(format!("{cfg:?}"), "b0:\n    $len .input\n    halt\n");
 }
 
 #[test]

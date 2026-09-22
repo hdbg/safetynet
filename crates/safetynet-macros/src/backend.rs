@@ -71,14 +71,21 @@ pub(crate) fn emit_artifact(
     let byte_at =
         |index: usize| Literal::usize_suffixed(offsets.get(index).copied().unwrap_or_default());
 
-    // Region bases wait for a layout at finalize; field offsets are known now,
-    // so they are baked at compile time by the linker below.
+    // Region bases and lengths wait for a layout at finalize; field offsets are
+    // known now, so they are baked at compile time by the linker below.
     let mut relocs = Vec::new();
     for reloc in resolved.relocs() {
         let at = byte_at(reloc.index);
         let region = region_tokens(reloc.region);
         relocs.push(quote! {
             ::safetynet::Reloc::region_base::<::safetynet::encoding::Packed<#order>>(#at, #region)
+        });
+    }
+    for reloc in resolved.len_relocs() {
+        let at = byte_at(reloc.index);
+        let region = region_tokens(reloc.region);
+        relocs.push(quote! {
+            ::safetynet::Reloc::region_len::<::safetynet::encoding::Packed<#order>>(#at, #region)
         });
     }
 
