@@ -25,6 +25,24 @@ impl Scalar {
         signed: true,
     };
 
+    /// A byte: what a region's `.iter()` yields.
+    pub(crate) const U8: Self = Self {
+        width: Width::U8,
+        signed: false,
+    };
+
+    /// A region header's `off` and `len`, and the counter that walks it.
+    pub(crate) const U32: Self = Self {
+        width: Width::U32,
+        signed: false,
+    };
+
+    /// A `usize` as the machine holds it: the reference copy's `.len()`.
+    pub(crate) const U64: Self = Self {
+        width: Width::U64,
+        signed: false,
+    };
+
     /// The scalar a type name denotes, if the machine can hold it.
     ///
     /// There is no two-byte access, so `u16`/`i16` are declined rather than

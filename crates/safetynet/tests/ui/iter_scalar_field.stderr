@@ -1,0 +1,30 @@
+error[E0599]: no method named `iter` found for type `u32` in the current scope
+  --> tests/ui/iter_scalar_field.rs:11:20
+   |
+11 |     for _ in p.seq.iter() {
+   |                    ^^^^ method not found in `u32`
+
+error[E0080]: evaluation panicked: a field reference resolved to no field in its layout
+ --> tests/ui/iter_scalar_field.rs:8:1
+  |
+8 | #[safetynet]
+  | ^^^^^^^^^^^^ evaluation of `__sn_program_walk::CODE` failed inside this call
+  |
+note: inside `link::<134>`
+ --> $RUST/core/src/panic.rs
+  |
+  |         $crate::panicking::panic_fmt($crate::const_format_args!($($t)+));
+  |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ the failure occurred here
+  |
+ ::: $WORKSPACE/crates/safetynet-core/src/link.rs
+  |
+  |                 None => panic!("a field reference resolved to no field in its layout"),
+  |                         -------------------------------------------------------------- in this macro invocation
+
+note: erroneous constant encountered
+ --> tests/ui/iter_scalar_field.rs:8:1
+  |
+8 | #[safetynet]
+  | ^^^^^^^^^^^^
+  |
+  = note: this note originates in the attribute macro `safetynet` (in Nightly builds, run with -Z macro-backtrace for more info)

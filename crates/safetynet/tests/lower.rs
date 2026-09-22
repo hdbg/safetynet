@@ -481,3 +481,145 @@ fn a_nested_field_reads_through_the_path() {
     };
     assert_eq!(nested_seq(m), 9);
 }
+
+use safetynet::Bytes;
+
+#[derive(Clone, VmLayout)]
+struct Msg {
+    kind: u8,
+    body: Bytes,
+    name: String,
+    tag: u64,
+}
+
+#[safetynet]
+fn xor_fold(m: Msg) -> u8 {
+    let mut x: u8 = 0;
+    for b in m.body.iter() {
+        x ^= *b;
+    }
+    x
+}
+
+#[safetynet]
+fn byte_sum(m: Msg) -> u32 {
+    let mut s: u32 = 0;
+    for &b in m.body.iter() {
+        s += b as u32;
+    }
+    s
+}
+
+#[safetynet]
+fn count_a(m: Msg) -> u32 {
+    let mut n: u32 = 0;
+    for b in m.name.bytes() {
+        if b == b'a' {
+            n += 1;
+        }
+    }
+    n
+}
+
+#[safetynet]
+fn first_nonzero(m: Msg) -> u8 {
+    for b in m.body.iter().copied() {
+        if b != 0 {
+            return b;
+        }
+    }
+    0
+}
+
+#[safetynet]
+fn lengths(m: Msg) -> u32 {
+    (m.body.len() + m.name.len()) as u32
+}
+
+#[safetynet]
+fn both_short(m: Msg) -> bool {
+    m.body.len() < 4 && m.name.len() < 4
+}
+
+#[safetynet]
+fn kind_plus_bytes(m: Msg) -> u32 {
+    let mut s: u32 = m.kind.typed::<u8>() as u32;
+    for b in m.body.iter() {
+        s += *b as u32;
+    }
+    for c in m.name.as_bytes().iter() {
+        s += *c as u32;
+    }
+    s
+}
+
+#[safetynet]
+fn raw_sum(v: Vec<u8>) -> u32 {
+    let mut s: u32 = 0;
+    for b in v.iter() {
+        s += *b as u32;
+    }
+    s
+}
+
+#[safetynet]
+fn text_len(s: String) -> u64 {
+    s.len() as u64
+}
+
+fn msg(body: &str, name: &str) -> Msg {
+    Msg {
+        kind: 5,
+        body: Bytes::from(body),
+        name: String::from(name),
+        tag: 9,
+    }
+}
+
+#[test]
+fn a_region_is_walked_byte_by_byte() {
+    assert_eq!(xor_fold(msg("abc", "")), b'a' ^ b'b' ^ b'c');
+    assert_eq!(
+        byte_sum(msg("abc", "")),
+        u32::from(b'a' + b'b') + u32::from(b'c')
+    );
+    assert_eq!(xor_fold(msg("", "x")), 0, "empty");
+}
+
+#[test]
+fn a_string_walks_its_utf8_bytes() {
+    assert_eq!(count_a(msg("", "banana")), 3);
+    assert_eq!(count_a(msg("aaa", "")), 0, "the other region is not read");
+}
+
+#[test]
+fn a_walk_may_return_early() {
+    assert_eq!(first_nonzero(msg("\0\0\x07\x09", "")), 7);
+    assert_eq!(first_nonzero(msg("\0\0", "")), 0);
+}
+
+#[test]
+fn a_region_length_is_the_header_length() {
+    assert_eq!(lengths(msg("abc", "defgh")), 8);
+    assert!(both_short(msg("abc", "d")));
+    assert!(!both_short(msg("abcd", "d")));
+}
+
+#[test]
+fn regions_and_scalars_mix() {
+    assert_eq!(kind_plus_bytes(msg("\x01\x02", "\x03")), 5 + 1 + 2 + 3);
+}
+
+#[test]
+fn the_region_may_be_the_whole_input() {
+    assert_eq!(raw_sum(vec![1, 2, 3, 250]), 256);
+    assert_eq!(raw_sum(Vec::new()), 0);
+    assert_eq!(text_len(String::from("héllo")), 6);
+}
+
+#[test]
+fn a_long_region_is_walked_within_the_fuel() {
+    let body: Vec<u8> = (0..=255u8).cycle().take(4096).collect();
+    let expected: u32 = body.iter().map(|b| u32::from(*b)).sum();
+    assert_eq!(raw_sum(body), expected);
+}
