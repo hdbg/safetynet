@@ -7,6 +7,8 @@ fn ui() {
     let t = trybuild::TestCases::new();
     t.pass("tests/ui/value_block_local.rs");
     t.pass("tests/ui/field_width_match.rs");
+    t.pass("tests/ui/bytes_iter.rs");
+    t.compile_fail("tests/ui/iter_scalar_field.rs");
     t.compile_fail("tests/ui/u16_field.rs");
     t.compile_fail("tests/ui/u16_param.rs");
     t.compile_fail("tests/ui/wrong_field_type.rs");

@@ -247,6 +247,132 @@ fn an_unsupported_primitive_parameter_is_refused() {
 }
 
 #[test]
+fn a_byte_region_is_walked_from_its_header() {
+    let cfg =
+        graph("fn f(p: Msg) -> u8 { let mut x: u8 = 0; for b in p.body.iter() { x ^= *b; } x }");
+    assert_eq!(
+        format!("{cfg:?}"),
+        "\
+.frame { c0: u8, c1: u64, c2: u32, c3: u32, c4: u8 }
+b0:
+    push8 0
+    $store c0
+    $push .input
+    $field #0
+    add
+    $loadfield #0
+    $push .input
+    add
+    $store c1
+    $push .input
+    $field #1
+    add
+    $loadfield #1
+    $store c2
+    $load c1
+    $load c2
+    add
+    $push .input
+    $len .input
+    add
+    le
+    jnz b2
+b1:
+    push8 0
+    $store c2
+    jmp b2
+b2:
+    push8 0
+    $store c3
+    jmp b3
+b3:
+    $load c3
+    $load c2
+    lt
+    jz b6
+b4:
+    $load c1
+    $load c3
+    add
+    ld8
+    $store c4
+    $load c0
+    $load c4
+    xor
+    push8 255
+    and
+    $store c0
+    jmp b5
+b5:
+    $load c3
+    push8 1
+    add
+    $store c3
+    jmp b3
+b6:
+    $load c0
+    halt
+"
+    );
+    assert_resolves(&cfg);
+}
+
+#[test]
+fn every_spelling_of_a_byte_walk_resolves() {
+    for iterable in [
+        "p.body.iter()",
+        "p.body.iter().copied()",
+        "p.name.bytes()",
+        "p.name.as_bytes().iter()",
+        "p.header.body.iter()",
+        "(p.body).iter()",
+    ] {
+        for pat in ["b", "&b", "_"] {
+            assert_resolves(&graph(&format!(
+                "fn f(p: Msg) -> u32 {{ let mut n: u32 = 0; for {pat} in {iterable} {{ n += 1; }} n }}"
+            )));
+        }
+    }
+}
+
+#[test]
+fn the_aggregate_itself_may_be_the_region() {
+    assert_resolves(&graph(
+        "fn f(s: String) -> u32 { let mut n: u32 = 0; for b in s.bytes() { n += b as u32; } n }",
+    ));
+}
+
+#[test]
+fn a_byte_walk_breaks_and_continues() {
+    assert_resolves(&graph(
+        "fn f(p: Msg) -> u8 { for b in p.body.iter() { if *b == 0 { continue; } if *b == 255 { break; } return *b; } 0 }",
+    ));
+}
+
+#[test]
+fn a_region_length_is_a_word_even_inside_a_condition() {
+    let cfg = graph("fn f(p: Msg) -> bool { p.body.len() < 4 && p.name.len() == 0 }");
+    assert!(format!("{cfg:?}").contains("$len .input"));
+    assert_resolves(&cfg);
+    assert_resolves(&graph("fn f(p: Msg) -> u32 { p.body.len() as u32 }"));
+}
+
+#[test]
+fn a_region_walk_needs_the_aggregate() {
+    assert!(refusal("fn f(n: u32) -> u32 { for b in n.iter() { } n }").contains("byte region"));
+    assert!(
+        refusal("fn f(p: Msg) -> u32 { let mut n: u32 = 0; for b in p.body.iter().rev() { } n }")
+            .contains("`.iter()`")
+    );
+    assert!(
+        refusal("fn f(p: Msg) -> u32 { for (a, b) in p.body.iter() { } 0 }")
+            .contains("name or `_`")
+    );
+    assert!(refusal("fn f(p: Msg) -> u32 { p.body.len(1) as u32 }").contains("no arguments"));
+    assert!(refusal("fn f(x: u32) -> u32 { *(x + 1) }").contains("byte binding"));
+}
+
+#[test]
 fn a_cast_normalizes_to_its_target() {
     let cfg = graph("fn f(x: i8) -> u32 { x as u32 }");
     assert!(format!("{cfg:?}").ends_with("push32 4294967295\n    and\n    halt\n"));

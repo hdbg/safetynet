@@ -55,6 +55,20 @@ enum Binding {
     Local { cell: CellId, ty: Scalar },
 }
 
+/// A byte region located in the frame: where its content starts, absolutely,
+/// and how many bytes it holds once checked against the input.
+#[derive(Clone, Copy)]
+struct RegionCells {
+    base: CellId,
+    len: CellId,
+}
+
+/// Why a `for` iterable was refused.
+const FOR_ITERABLE: &str = "a `for` loop must iterate a range `a..b` or a byte region's `.iter()`";
+
+/// Why a `.iter()` or `.len()` receiver was refused.
+const NOT_A_REGION: &str = "only the aggregate parameter or one of its fields is a byte region";
+
 /// The blocks a `break` and a `continue` jump to for one enclosing loop.
 struct Loop {
     /// The loop's label, without its tick.
@@ -501,23 +515,31 @@ impl Lowerer {
         }
     }
 
+    /// Lowers `for pat in iterable { body }`: a counted range, or a walk over
+    /// the bytes of a region.
+    fn lower_for(&mut self, for_expr: &syn::ExprForLoop) -> syn::Result<Flow> {
+        match &*for_expr.expr {
+            syn::Expr::Range(range) => self.lower_for_range(for_expr, range),
+            syn::Expr::MethodCall(call) => self.lower_for_bytes(for_expr, call),
+            other => Err(err(other, FOR_ITERABLE)),
+        }
+    }
+
     /// Lowers `for i in a..b { body }` as a counted loop.
     ///
     /// The end bound is snapshotted so mutating it in the body cannot change the
-    /// count. `continue` targets the increment, so the variable still advances.
-    fn lower_for(&mut self, for_expr: &syn::ExprForLoop) -> syn::Result<Flow> {
-        let (start, end) = range_bounds(for_expr)?;
+    /// count.
+    fn lower_for_range(
+        &mut self,
+        for_expr: &syn::ExprForLoop,
+        range: &syn::ExprRange,
+    ) -> syn::Result<Flow> {
+        let (start, end) = range_bounds(range)?;
         let var = for_var(for_expr)?;
         let scalar = self.range_scalar(start, end)?;
 
-        let i_cell = self
-            .builder
-            .cell(scalar.width)
-            .ok_or_else(|| err(&for_expr.pat, "the frame is too large"))?;
-        let end_cell = self
-            .builder
-            .cell(scalar.width)
-            .ok_or_else(|| err(&for_expr.pat, "the frame is too large"))?;
+        let i_cell = self.cell(scalar.width, &for_expr.pat)?;
+        let end_cell = self.cell(scalar.width, &for_expr.pat)?;
 
         // i = start; end = b. Both bounds are evaluated outside the variable's
         // scope, so `for i in i..n` reads the outer `i`.
@@ -526,6 +548,69 @@ impl Lowerer {
         self.lower_expr(end, scalar, 0)?;
         self.store(end_cell)?;
 
+        self.counted_loop(for_expr, i_cell, end_cell, scalar, |this| {
+            if let Some(name) = var {
+                this.bind(
+                    name,
+                    Binding::Local {
+                        cell: i_cell,
+                        ty: scalar,
+                    },
+                )?;
+            }
+            Ok(())
+        })
+    }
+
+    /// Lowers `for b in region.iter() { body }`, walking a byte region's
+    /// content from its header.
+    ///
+    /// Each byte is copied into a cell the binding reads, so the body sees a
+    /// `u8` where the reference copy sees a `&u8`.
+    fn lower_for_bytes(
+        &mut self,
+        for_expr: &syn::ExprForLoop,
+        call: &syn::ExprMethodCall,
+    ) -> syn::Result<Flow> {
+        let receiver = iter_receiver(call)?;
+        let var = for_var(for_expr)?;
+        let region = self.load_region(receiver, 0)?;
+        let i_cell = self.cell(Width::U32, &for_expr.pat)?;
+        let byte_cell = self.cell(Width::U8, &for_expr.pat)?;
+
+        self.push_word(0)?;
+        self.store(i_cell)?;
+
+        self.counted_loop(for_expr, i_cell, region.len, Scalar::U32, |this| {
+            this.load(region.base)?;
+            this.load(i_cell)?;
+            this.push_instr(Add)?;
+            this.push_instr(Ld8)?;
+            this.store(byte_cell)?;
+            if let Some(name) = var {
+                this.bind(
+                    name,
+                    Binding::Local {
+                        cell: byte_cell,
+                        ty: Scalar::U8,
+                    },
+                )?;
+            }
+            Ok(())
+        })
+    }
+
+    /// The loop every `for` becomes: while `i < end`, run `prologue` then the
+    /// body, then `i += 1`. `continue` targets the increment, so the counter
+    /// still advances.
+    fn counted_loop(
+        &mut self,
+        for_expr: &syn::ExprForLoop,
+        i_cell: CellId,
+        end_cell: CellId,
+        scalar: Scalar,
+        prologue: impl FnOnce(&mut Self) -> syn::Result<()>,
+    ) -> syn::Result<Flow> {
         let head = self.builder.block(0);
         self.seal(self.cur, Terminator::Jmp(head))?;
         self.cur = head;
@@ -553,15 +638,7 @@ impl Lowerer {
             break_to: Some(exit),
         });
         let flow = self.scoped(|this| {
-            if let Some(name) = var {
-                this.bind(
-                    name,
-                    Binding::Local {
-                        cell: i_cell,
-                        ty: scalar,
-                    },
-                )?;
-            }
+            prologue(this)?;
             this.lower_stmts(&for_expr.body.stmts)
         })?;
         self.loops.pop();
@@ -569,7 +646,6 @@ impl Lowerer {
             self.seal(self.cur, Terminator::Jmp(incr))?;
         }
 
-        // Increment: i = i + 1, then back to the head.
         self.cur = incr;
         self.load(i_cell)?;
         self.push_word(1)?;
@@ -579,6 +655,91 @@ impl Lowerer {
 
         self.cur = exit;
         Ok(Flow::Open)
+    }
+
+    /// Locates a region's content: the absolute address it starts at and its
+    /// length, both read from the header the host wrote.
+    ///
+    /// The header is data, so its length is checked against where the input
+    /// really ends before anything is read through it; a header that points
+    /// past the input describes an empty region. The blocks this opens sit at
+    /// `depth`, so it can run inside an expression.
+    fn load_region(&mut self, receiver: &syn::Expr, depth: u32) -> syn::Result<RegionCells> {
+        let (ty, path) = self.region_path(receiver)?;
+        let base = self.cell(Width::U64, receiver)?;
+        let len = self.cell(Width::U32, receiver)?;
+
+        let off_hole = self.region_hole(&ty, &path, "off", receiver)?;
+        self.read_hole(off_hole)?;
+        self.push_base(Region::Input)?;
+        self.push_instr(Add)?;
+        self.store(base)?;
+
+        let len_hole = self.region_hole(&ty, &path, "len", receiver)?;
+        self.read_hole(len_hole)?;
+        self.store(len)?;
+
+        // base + len <= end of .input, or the region is empty.
+        self.load(base)?;
+        self.load(len)?;
+        self.push_instr(Add)?;
+        self.push_base(Region::Input)?;
+        self.body()?.len(Region::Input);
+        self.push_instr(Add)?;
+        self.push_instr(CmpLe)?;
+        let clamp = self.builder.block(depth);
+        let join = self.builder.block(depth);
+        self.seal(
+            self.cur,
+            Terminator::Br {
+                then: join,
+                els: clamp,
+            },
+        )?;
+        self.cur = clamp;
+        self.push_word(0)?;
+        self.store(len)?;
+        self.seal(self.cur, Terminator::Jmp(join))?;
+        self.cur = join;
+
+        Ok(RegionCells { base, len })
+    }
+
+    /// The aggregate and the path a region expression names: a field of the
+    /// aggregate parameter, or the parameter itself when it is the region.
+    fn region_path(&self, expr: &syn::Expr) -> syn::Result<(syn::Type, Vec<syn::Ident>)> {
+        let (root, path) = match unparen(expr) {
+            syn::Expr::Field(field) => field_path(field)?,
+            syn::Expr::Path(path) => match path.path.get_ident() {
+                Some(name) => (name.to_string(), Vec::new()),
+                None => return Err(err(path, NOT_A_REGION)),
+            },
+            other => return Err(err(other, NOT_A_REGION)),
+        };
+        match &self.aggregate {
+            Some((name, ty)) if *name == root => Ok((ty.clone(), path)),
+            _ => Err(err(expr, NOT_A_REGION)),
+        }
+    }
+
+    /// A hole for the header field `leaf` of the region at `path`.
+    fn region_hole(
+        &mut self,
+        ty: &syn::Type,
+        path: &[syn::Ident],
+        leaf: &str,
+        node: impl ToTokens,
+    ) -> syn::Result<u32> {
+        let mut path = path.to_vec();
+        path.push(syn::Ident::new(leaf, Span::call_site()));
+        self.field_hole(ty.clone(), path, node)
+    }
+
+    /// Adds a frame cell, or refuses when the frame cannot hold it.
+    fn cell(&mut self, width: Width, node: impl ToTokens) -> syn::Result<CellId> {
+        self.builder
+            .cell(width)
+            .ok_or_else(|| err(node, "the frame is too large"))
     }
 
     /// Lowers `loop { body }`, which falls through only where it breaks.
@@ -779,6 +940,7 @@ impl Lowerer {
             syn::Expr::Unary(unary) => self.lower_unary(unary, expected, depth),
             syn::Expr::Binary(binary) => self.lower_binary(binary, expected, depth),
             syn::Expr::MethodCall(call) if call.method == "typed" => self.lower_field_typed(call),
+            syn::Expr::MethodCall(call) if call.method == "len" => self.lower_len(call, depth),
             syn::Expr::Cast(cast) => self.lower_cast(cast, depth),
             syn::Expr::Field(field) => self.lower_field_known(field),
             other => Err(err(other, "this expression is not supported yet")),
@@ -793,11 +955,7 @@ impl Lowerer {
     /// `Typed::typed`, which compiles only when the named type is exactly the
     /// field's own.
     fn lower_field_typed(&mut self, call: &syn::ExprMethodCall) -> syn::Result<Scalar> {
-        let mut inner: &syn::Expr = &call.receiver;
-        while let syn::Expr::Paren(paren) = inner {
-            inner = &paren.expr;
-        }
-        let syn::Expr::Field(field) = inner else {
+        let syn::Expr::Field(field) = unparen(&call.receiver) else {
             return Err(err(call, "only a field names its type with `.typed()`"));
         };
         if !call.args.is_empty() {
@@ -857,17 +1015,46 @@ impl Lowerer {
             Some((name, ty)) if *name == root => ty.clone(),
             _ => return Err(err(field, "only the aggregate parameter has fields")),
         };
-        let hole = u32::try_from(self.field_refs.len())
-            .map_err(|_| err(field, "too many field references"))?;
-        self.field_refs.push(FieldRef { ty, path });
+        let hole = self.field_hole(ty, path, field)?;
+        self.read_hole(hole)?;
+        self.normalize_load(scalar)?;
+        Ok(scalar)
+    }
 
-        // base + offset is the field's address; the load reads it at its width.
+    /// Records a field reference for the linker, returning the hole naming it.
+    fn field_hole(
+        &mut self,
+        ty: syn::Type,
+        path: Vec<syn::Ident>,
+        node: impl ToTokens,
+    ) -> syn::Result<u32> {
+        let hole = u32::try_from(self.field_refs.len())
+            .map_err(|_| err(node, "too many field references"))?;
+        self.field_refs.push(FieldRef { ty, path });
+        Ok(hole)
+    }
+
+    /// Reads the field a hole names: base + offset is its address, and the
+    /// load reads it at the width the layout gives it.
+    fn read_hole(&mut self, hole: u32) -> syn::Result<()> {
         self.push_base(Region::Input)?;
         self.body()?.field(hole);
         self.push_instr(Add)?;
         self.body()?.load_field(hole);
-        self.normalize_load(scalar)?;
-        Ok(scalar)
+        Ok(())
+    }
+
+    /// Lowers `region.len()`: the header's length, checked against the input.
+    ///
+    /// The reference copy sees a `usize`, which the machine holds as a word;
+    /// guest code narrows it with `as`, as Rust would have it.
+    fn lower_len(&mut self, call: &syn::ExprMethodCall, depth: u32) -> syn::Result<Scalar> {
+        if !call.args.is_empty() || call.turbofish.is_some() {
+            return Err(err(call, "`.len()` takes no arguments"));
+        }
+        let region = self.load_region(&call.receiver, depth)?;
+        self.load(region.len)?;
+        Ok(Scalar::U64)
     }
 
     /// Lowers `e as T` between machine scalars.
@@ -898,6 +1085,10 @@ impl Lowerer {
             syn::Lit::Bool(boolean) => {
                 self.push_word(boolean.value.into())?;
                 Ok(Scalar::BOOL)
+            }
+            syn::Lit::Byte(byte) => {
+                self.push_word(byte.value().into())?;
+                Ok(Scalar::U8)
             }
             other => Err(err(other, "only integer and bool literals are supported")),
         }
@@ -958,6 +1149,13 @@ impl Lowerer {
                     Ok(ty)
                 }
             }
+            // The only reference the subset makes is a region loop's `&u8`
+            // binding, whose cell already holds the byte. The reference copy
+            // refuses `*` on anything else.
+            syn::UnOp::Deref(_) => match unparen(&unary.expr) {
+                syn::Expr::Path(path) => self.lower_path(path),
+                other => Err(err(other, "only a loop's byte binding can be dereferenced")),
+            },
             other => Err(err(other, "this operator is not supported yet")),
         }
     }
@@ -1066,6 +1264,7 @@ impl Lowerer {
             syn::Expr::MethodCall(call) if call.method == "typed" => {
                 Scalar::of(typed_argument(call)?)
             }
+            syn::Expr::MethodCall(call) if call.method == "len" => Some(Scalar::U64),
             syn::Expr::Cast(cast) => Scalar::of(&cast.ty),
             syn::Expr::Field(field) => {
                 let (_, path) = field_path(field).ok()?;
@@ -1281,6 +1480,45 @@ fn is_value_expr(expr: &syn::Expr) -> bool {
     )
 }
 
+/// The expression under any parentheses.
+fn unparen(expr: &syn::Expr) -> &syn::Expr {
+    let mut inner = expr;
+    while let syn::Expr::Paren(paren) = inner {
+        inner = &paren.expr;
+    }
+    inner
+}
+
+/// The region a `for` walks: `r.iter()`, `r.iter().copied()`, `r.bytes()` or
+/// `r.as_bytes().iter()`, each of which walks the bytes in Rust too.
+fn iter_receiver(call: &syn::ExprMethodCall) -> syn::Result<&syn::Expr> {
+    let plain = |call: &syn::ExprMethodCall| {
+        if call.args.is_empty() && call.turbofish.is_none() {
+            Ok(())
+        } else {
+            Err(err(call, "iterating a byte region takes no arguments"))
+        }
+    };
+    let mut call = call;
+    if call.method == "copied" {
+        plain(call)?;
+        call = match &*call.receiver {
+            syn::Expr::MethodCall(inner) if inner.method == "iter" => inner,
+            other => return Err(err(other, "`.copied()` follows `.iter()` on a byte region")),
+        };
+    }
+    if call.method != "iter" && call.method != "bytes" {
+        return Err(err(call, FOR_ITERABLE));
+    }
+    plain(call)?;
+    Ok(match &*call.receiver {
+        syn::Expr::MethodCall(inner) if inner.method == "as_bytes" && inner.args.is_empty() => {
+            &inner.receiver
+        }
+        other => other,
+    })
+}
+
 /// Picks the signed or unsigned opcode by the operand type.
 fn signed(ty: Scalar, when_signed: Instr, when_unsigned: Instr) -> Instr {
     if ty.signed {
@@ -1354,8 +1592,15 @@ fn suffix_scalar(expr: &syn::Expr) -> Option<syn::Result<Scalar>> {
 }
 
 /// The name a `for` loop binds, or `None` for `_`.
+///
+/// `&b` is accepted too: it is how the reference copy binds a region's byte by
+/// value, and the cell holds the byte either way.
 fn for_var(for_expr: &syn::ExprForLoop) -> syn::Result<Option<String>> {
-    match &*for_expr.pat {
+    let pat = match &*for_expr.pat {
+        syn::Pat::Reference(reference) => &*reference.pat,
+        other => other,
+    };
+    match pat {
         syn::Pat::Wild(_) => Ok(None),
         syn::Pat::Ident(pat) if pat.subpat.is_none() => Ok(Some(pat.ident.to_string())),
         other => Err(err(other, "a `for` binding must be a name or `_`")),
@@ -1363,11 +1608,7 @@ fn for_var(for_expr: &syn::ExprForLoop) -> syn::Result<Option<String>> {
 }
 
 /// The start and end of a `for` loop's exclusive range.
-fn range_bounds(for_expr: &syn::ExprForLoop) -> syn::Result<(&syn::Expr, &syn::Expr)> {
-    let range = match &*for_expr.expr {
-        syn::Expr::Range(range) => range,
-        other => return Err(err(other, "a `for` loop must iterate a range `a..b`")),
-    };
+fn range_bounds(range: &syn::ExprRange) -> syn::Result<(&syn::Expr, &syn::Expr)> {
     if !matches!(range.limits, syn::RangeLimits::HalfOpen(_)) {
         return Err(err(range, "an inclusive `..=` range is not supported yet"));
     }
