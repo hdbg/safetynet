@@ -72,23 +72,52 @@ impl From<String> for Bytes {
     }
 }
 
+/// What a header field holds: an offset or a length within the image, which
+/// the layout measures as a `u32` (an address fits one by construction).
+type HeaderField = u32;
+
+/// Bytes one header field occupies, from the field type's own layout.
+const FIELD_SIZE: usize = <HeaderField as VmLayout>::SIZE;
+
+/// Where the content's offset sits in the header.
+const OFF: usize = 0;
+
+/// Where the content's length sits: right after the offset, which is already
+/// aligned for it since both are the same type.
+const LEN: usize = OFF + FIELD_SIZE;
+
 /// The header every region shares: where its content starts, then how long it
 /// is. Named fields, so the linker resolves `.off` and `.len` like any other.
-const HEADER: &TypeLayout =
-    &TypeLayout::new(&[Field::new("off", 0, 4, None), Field::new("len", 4, 4, None)]);
+const HEADER: &TypeLayout = &TypeLayout::new(&[
+    Field::new("off", OFF as u32, FIELD_SIZE as u32, None),
+    Field::new("len", LEN as u32, FIELD_SIZE as u32, None),
+]);
 
 /// Bytes the header occupies.
-const HEADER_SIZE: usize = 8;
+const HEADER_SIZE: usize = LEN + FIELD_SIZE;
+
+/// The header's alignment: its fields', since it is nothing but them.
+const HEADER_ALIGN: usize = <HeaderField as VmLayout>::ALIGN;
+
+/// Writes one header field through the field type's own marshalling.
+fn write_field<B: ByteOrder>(slot: &mut [u8], at: usize, value: HeaderField, tail: &mut Tail) {
+    if let Some(field) = slot.get_mut(at..) {
+        value.marshal::<B>(field, tail);
+    }
+}
+
+/// Reads one header field; a slot too short to hold it reads as zero.
+fn read_field<B: ByteOrder>(slot: &[u8], at: usize) -> HeaderField {
+    slot.get(at..)
+        .map(|field| HeaderField::unmarshal::<B>(field, slot))
+        .unwrap_or_default()
+}
 
 /// Appends `content` to the tail and writes its header into `slot`.
 fn marshal_region<B: ByteOrder>(content: &[u8], slot: &mut [u8], tail: &mut Tail) {
     let (off, len) = tail.push(content);
-    if let Some(bytes) = slot.get_mut(0..4) {
-        bytes.copy_from_slice(&B::write_u32(off));
-    }
-    if let Some(bytes) = slot.get_mut(4..8) {
-        bytes.copy_from_slice(&B::write_u32(len));
-    }
+    write_field::<B>(slot, OFF, off, tail);
+    write_field::<B>(slot, LEN, len, tail);
 }
 
 /// Follows the header in `slot` into `input`.
@@ -96,14 +125,8 @@ fn marshal_region<B: ByteOrder>(content: &[u8], slot: &mut [u8], tail: &mut Tail
 /// The header is data, so it is not trusted: content that runs past the input
 /// is cut short, and a start past the input is empty.
 fn region_content<'a, B: ByteOrder>(slot: &[u8], input: &'a [u8]) -> &'a [u8] {
-    let word = |at: usize| {
-        slot.get(at..at + 4)
-            .and_then(|bytes| bytes.try_into().ok())
-            .map(B::read_u32)
-            .unwrap_or_default() as usize
-    };
-    let start = word(0);
-    let end = start.saturating_add(word(4));
+    let start = read_field::<B>(slot, OFF) as usize;
+    let end = start.saturating_add(read_field::<B>(slot, LEN) as usize);
     input
         .get(start..end)
         .or_else(|| input.get(start..))
@@ -113,7 +136,7 @@ fn region_content<'a, B: ByteOrder>(slot: &[u8], input: &'a [u8]) -> &'a [u8] {
 impl VmLayout for Bytes {
     const LAYOUT: &'static TypeLayout = HEADER;
     const SIZE: usize = HEADER_SIZE;
-    const ALIGN: usize = 4;
+    const ALIGN: usize = HEADER_ALIGN;
 
     fn marshal<B: ByteOrder>(&self, slot: &mut [u8], tail: &mut Tail) {
         marshal_region::<B>(&self.0, slot, tail);
@@ -127,7 +150,7 @@ impl VmLayout for Bytes {
 impl VmLayout for Vec<u8> {
     const LAYOUT: &'static TypeLayout = HEADER;
     const SIZE: usize = HEADER_SIZE;
-    const ALIGN: usize = 4;
+    const ALIGN: usize = HEADER_ALIGN;
 
     fn marshal<B: ByteOrder>(&self, slot: &mut [u8], tail: &mut Tail) {
         marshal_region::<B>(self, slot, tail);
@@ -144,7 +167,7 @@ impl VmLayout for Vec<u8> {
 impl VmLayout for String {
     const LAYOUT: &'static TypeLayout = HEADER;
     const SIZE: usize = HEADER_SIZE;
-    const ALIGN: usize = 4;
+    const ALIGN: usize = HEADER_ALIGN;
 
     fn marshal<B: ByteOrder>(&self, slot: &mut [u8], tail: &mut Tail) {
         marshal_region::<B>(self.as_bytes(), slot, tail);
