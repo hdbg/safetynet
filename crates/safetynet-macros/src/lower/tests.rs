@@ -245,3 +245,21 @@ fn an_unsupported_primitive_parameter_is_refused() {
     assert!(refusal("fn f(x: u16) -> u32 { 7 }").contains("machine can hold"));
     assert!(refusal("fn f(x: f64) -> u32 { 7 }").contains("machine can hold"));
 }
+
+#[test]
+fn a_cast_normalizes_to_its_target() {
+    let cfg = graph("fn f(x: i8) -> u32 { x as u32 }");
+    assert!(format!("{cfg:?}").ends_with("push32 4294967295\n    and\n    halt\n"));
+
+    let cfg = graph("fn f(x: u8) -> i8 { x as i8 }");
+    assert!(format!("{cfg:?}").ends_with("shl\n    push8 56\n    sar\n    halt\n"));
+
+    let cfg = graph("fn f(x: u8) -> u32 { x as u32 }");
+    assert_eq!(
+        format!("{cfg:?}"),
+        "b0:\n    $push .input\n    ld8\n    halt\n",
+        "widening from unsigned is already at rest"
+    );
+    assert_resolves(&graph("fn f(x: i32) -> u64 { x as u64 }"));
+    assert!(refusal("fn f(x: u32) -> u32 { (x as u16) as u32 }").contains("machine can hold"));
+}
