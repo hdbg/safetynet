@@ -7,12 +7,23 @@ fn __sn_ref_doubled(x: u32) -> u32 {
 }
 #[must_use]
 fn doubled(x: u32) -> u32 {
-    let mut __sn_input = [0u8; 4];
-    if let ::core::option::Option::Some(__sn_slot) = __sn_input.get_mut(0..) {
-        ::safetynet::VmLayout::marshal::<::safetynet::Le>(&x, __sn_slot);
+    let mut __sn_fixed = [0u8; 4];
+    let mut __sn_tail = ::safetynet::Tail::new(4);
+    if let ::core::option::Option::Some(__sn_slot) = __sn_fixed.get_mut(0..) {
+        ::safetynet::VmLayout::marshal::<::safetynet::Le>(&x, __sn_slot, &mut __sn_tail);
     }
+    let mut __sn_input = __sn_fixed.to_vec();
+    __sn_input.extend_from_slice(__sn_tail.as_slice());
+    let __sn_input_len = match u32::try_from(__sn_input.len()) {
+        ::core::result::Result::Ok(__sn_len) => __sn_len,
+        ::core::result::Result::Err(_) => {
+            ::core::panicking::panic_fmt(
+                format_args!("safetynet: the input is too large"),
+            );
+        }
+    };
     let __sn_layout = match ::safetynet::Layout::new(::safetynet::image::Sizes {
-        input: 4u32,
+        input: __sn_input_len,
         scratch: 0,
         stack: 4096u32,
     }) {

@@ -24,7 +24,7 @@ pub use image::{Image, Layout, Region};
 pub use ir::{Artifact, Reloc};
 pub use isa::{FrameSize, Instr, Op};
 pub use link::{Hole, Patch, link};
-pub use marshal::{Field, TypeLayout, VmLayout};
+pub use marshal::{Field, Tail, TypeLayout, VmLayout};
 pub use program::Program;
 pub use value::{Same, Typed, VmValue};
 

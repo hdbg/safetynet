@@ -100,7 +100,7 @@ pub(crate) fn vm_layout(input: DeriveInput) -> syn::Result<TokenStream> {
             if let ::core::option::Option::Some(__fd) = __f.get(#i) {
                 let __o = __fd.offset() as usize;
                 if let ::core::option::Option::Some(__slot) = __mem.get_mut(__o..__o + __fd.size() as usize) {
-                    ::safetynet::VmLayout::marshal::<B>(&self.#f, __slot);
+                    ::safetynet::VmLayout::marshal::<B>(&self.#f, __slot, __tail);
                 }
             }
         }
@@ -116,7 +116,7 @@ pub(crate) fn vm_layout(input: DeriveInput) -> syn::Result<TokenStream> {
                     }
                     ::core::option::Option::None => &[],
                 };
-                <#ty as ::safetynet::VmLayout>::unmarshal::<B>(__sub)
+                <#ty as ::safetynet::VmLayout>::unmarshal::<B>(__sub, __input)
             },
         }
     });
@@ -133,12 +133,12 @@ pub(crate) fn vm_layout(input: DeriveInput) -> syn::Result<TokenStream> {
             const SIZE: usize = #name::#sn.1;
             const ALIGN: usize = #name::#sn.2;
 
-            fn marshal<B: ::safetynet::ByteOrder>(&self, __mem: &mut [u8]) {
+            fn marshal<B: ::safetynet::ByteOrder>(&self, __mem: &mut [u8], __tail: &mut ::safetynet::Tail) {
                 let __f = <Self as ::safetynet::VmLayout>::LAYOUT.fields();
                 #(#marshal)*
             }
 
-            fn unmarshal<B: ::safetynet::ByteOrder>(__mem: &[u8]) -> Self {
+            fn unmarshal<B: ::safetynet::ByteOrder>(__mem: &[u8], __input: &[u8]) -> Self {
                 let __f = <Self as ::safetynet::VmLayout>::LAYOUT.fields();
                 Self { #(#unmarshal)* }
             }

@@ -73,15 +73,23 @@ pub(crate) fn expand(attr: TokenStream, item: TokenStream) -> syn::Result<TokenS
     let sig = &func.sig;
     let args = param_names(&func)?;
     let fuel = Literal::u64_suffixed(FUEL);
-    let (input_len, input_bytes, marshal) =
-        input_shape(aggregate.as_ref(), &args, &param_offsets, input_size);
+    let (fixed_len, marshal) = input_shape(aggregate.as_ref(), &args, &param_offsets, input_size);
     let public = quote! {
         #(#attrs)*
         #vis #sig {
-            let mut __sn_input = #input_len;
+            // The fixed part is sized at compile time; a variable-length field
+            // appends its content to the tail, so `.input` is sized at run time.
+            let mut __sn_fixed = [0u8; #fixed_len];
+            let mut __sn_tail = ::safetynet::Tail::new(#fixed_len);
             #marshal
+            let mut __sn_input = __sn_fixed.to_vec();
+            __sn_input.extend_from_slice(__sn_tail.as_slice());
+            let __sn_input_len = match u32::try_from(__sn_input.len()) {
+                ::core::result::Result::Ok(__sn_len) => __sn_len,
+                ::core::result::Result::Err(_) => ::core::panic!("safetynet: the input is too large"),
+            };
             let __sn_layout = match ::safetynet::Layout::new(::safetynet::image::Sizes {
-                input: #input_bytes,
+                input: __sn_input_len,
                 scratch: 0,
                 stack: #stack,
             }) {
@@ -138,21 +146,26 @@ pub(crate) fn expand(attr: TokenStream, item: TokenStream) -> syn::Result<TokenS
     })
 }
 
-/// The input buffer, the `.input` size, and the marshalling that fills it.
+/// The fixed part's size and the marshalling that fills it.
 ///
-/// Scalars pack at their offsets; a single aggregate fills the buffer through
-/// its own `marshal`, sized by its `VmLayout::SIZE`.
+/// Scalars pack at their offsets; a single aggregate fills the fixed part
+/// through its own `marshal`, sized by its `VmLayout::SIZE`.
 fn input_shape(
     aggregate: Option<&syn::Type>,
     args: &[syn::Ident],
     param_offsets: &[u32],
     input_size: u32,
-) -> (TokenStream, TokenStream, TokenStream) {
+) -> (TokenStream, TokenStream) {
     if let (Some(ty), Some(arg)) = (aggregate, args.first()) {
         return (
-            quote! { [0u8; <#ty as ::safetynet::VmLayout>::SIZE] },
-            quote! { <#ty as ::safetynet::VmLayout>::SIZE as u32 },
-            quote! { ::safetynet::VmLayout::marshal::<::safetynet::Le>(&#arg, &mut __sn_input); },
+            quote! { <#ty as ::safetynet::VmLayout>::SIZE },
+            quote! {
+                ::safetynet::VmLayout::marshal::<::safetynet::Le>(
+                    &#arg,
+                    &mut __sn_fixed,
+                    &mut __sn_tail,
+                );
+            },
         );
     }
 
@@ -161,12 +174,11 @@ fn input_shape(
         .iter()
         .map(|offset| Literal::usize_unsuffixed(*offset as usize));
     (
-        quote! { [0u8; #len] },
-        quote! { #input_size },
+        quote! { #len },
         quote! {
             #(
-                if let ::core::option::Option::Some(__sn_slot) = __sn_input.get_mut(#offsets..) {
-                    ::safetynet::VmLayout::marshal::<::safetynet::Le>(&#args, __sn_slot);
+                if let ::core::option::Option::Some(__sn_slot) = __sn_fixed.get_mut(#offsets..) {
+                    ::safetynet::VmLayout::marshal::<::safetynet::Le>(&#args, __sn_slot, &mut __sn_tail);
                 }
             )*
         },
