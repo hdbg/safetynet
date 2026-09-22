@@ -367,6 +367,7 @@ type Apply = Box<dyn Fn(&Layout, &mut [u8]) -> Result<(), NotFinal>>;
 
 impl Reloc {
     /// A relocation over the `len` bytes at `at`, rewritten by `apply`.
+    #[inline(always)]
     pub fn new(
         at: usize,
         len: usize,
@@ -386,6 +387,7 @@ impl Reloc {
     /// Generic over the encoder rather than tied to one wire format. The encoder
     /// carries its own byte order, and a macro expansion hands it the packed one
     /// — the only format a shipped program decodes.
+    #[inline(always)]
     pub fn region_base<E: Encoder + Default + 'static>(at: usize, region: Region) -> Self {
         let encoder = E::default();
         // Measure the slot from the push it holds rather than assuming a width.
@@ -400,6 +402,7 @@ impl Reloc {
     /// The region-length relocation: re-encode the region's size as a `Push32`
     /// with the encoder `E`, the way [`region_base`](Self::region_base) does
     /// its address.
+    #[inline(always)]
     pub fn region_len<E: Encoder + Default + 'static>(at: usize, region: Region) -> Self {
         let encoder = E::default();
         let len = encoder
@@ -420,8 +423,11 @@ impl core::fmt::Debug for Reloc {
     }
 }
 
+// The relocation path is folded into each closure `finalize` runs, so the
+// binary carries one body per relocation and no helper to find them by.
 /// The push a region base lowers to: a narrow push, four bytes shorter than a
 /// wide one for an address that fits a `u32` by construction.
+#[inline(always)]
 fn base_push(region: Region, layout: &Layout) -> Instr {
     Push32 {
         imm: layout.span(region).base(),
@@ -431,6 +437,7 @@ fn base_push(region: Region, layout: &Layout) -> Instr {
 
 /// The push a region length lowers to: a `u32` like the address, since a
 /// region is a span of the same address space.
+#[inline(always)]
 fn len_push(region: Region, layout: &Layout) -> Instr {
     Push32 {
         imm: layout.span(region).len(),
@@ -439,6 +446,7 @@ fn len_push(region: Region, layout: &Layout) -> Instr {
 }
 
 /// Re-encodes `instr` with `encoder` and writes it over `slice`.
+#[inline(always)]
 fn reencode<E: Encoder>(encoder: &E, instr: Instr, slice: &mut [u8]) -> Result<(), NotFinal> {
     let mut tmp = Vec::new();
     encoder.encode(instr, &mut tmp).map_err(NotFinal::encode)?;
@@ -448,6 +456,7 @@ fn reencode<E: Encoder>(encoder: &E, instr: Instr, slice: &mut [u8]) -> Result<(
 /// Writes freshly encoded bytes over the slot they belong in, refusing a length
 /// that would not fit — a region base is always five bytes, so this only ever
 /// fires if the slot was measured against a different encoder.
+#[inline(always)]
 fn copy_reencoded(bytes: &[u8], slice: &mut [u8]) -> Result<(), NotFinal> {
     if bytes.len() != slice.len() {
         return Err(NotFinal::EncoderDisagrees {
