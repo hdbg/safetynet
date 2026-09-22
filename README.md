@@ -61,6 +61,9 @@ compile time with an error pointing at the offending code.
 
 - Control flow: `if`, `while`, `loop`, `for a..b`, `break`, `continue`
 - Short-circuiting `&&` and `||`
+- `as` casts between the machine's scalars
+- Byte regions: `Bytes`, `String` and `Vec<u8>` fields (or one as the whole
+  parameter), walked with `for b in p.body.iter()` and measured with `.len()`
 - `match`
 - Enums, both field-less and data-carrying (WIP)
 - `Result` and `?`, with a single error type (WIP)
@@ -88,6 +91,35 @@ supplies it. The call is an identity function bounded so it compiles only when
 the field is *exactly* the named type: name the wrong one and rustc rejects
 the hidden reference copy of your function, pointing at the call. A field used
 before its type is named is refused with an error that spells out the fix.
+
+A variable-length field crosses as a fixed eight-byte header — where its bytes
+start and how many there are — with the bytes appended after the struct, so
+every field offset is still a compile-time constant and the linker stays
+`const`. The guest walks it the way plain Rust does; `.len()` is a `usize` to
+Rust and a word to the machine, so narrow it with `as` where you need to.
+
+```rust
+use safetynet::Bytes;
+
+#[derive(Clone, VmLayout)]
+struct Msg {
+    kind: u8,
+    body: Bytes,
+    name: String,
+}
+
+#[safetynet]
+fn checksum(m: Msg) -> u32 {
+    let mut s: u32 = 0;
+    for b in m.body.iter() {
+        s += *b as u32;
+    }
+    for c in m.name.bytes() {
+        s ^= c as u32;
+    }
+    s + m.body.len() as u32
+}
+```
 
 ## Workspace
 
