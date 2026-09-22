@@ -21,8 +21,8 @@ mod validate;
 
 pub use builder::{BlockBody, BuildError, Builder};
 pub use finalize::{
-    Artifact, BaseReloc, FieldReloc, LoadReloc, NotFinal, Reloc, Resolved, TagReloc, assemble,
-    assemble_with, finalize, finalize_with, resolve,
+    Artifact, BaseReloc, FieldReloc, LenReloc, LoadReloc, NotFinal, Reloc, Resolved, TagReloc,
+    assemble, assemble_with, finalize, finalize_with, resolve,
 };
 pub use frame::{Cell, CellId, Frame};
 pub use validate::{Invalid, Limits, Where, validate, validate_with};
@@ -68,6 +68,12 @@ pub enum Item {
     /// when the image is laid out, and a program that baked the number in would
     /// have to be rebuilt every time anything before it changed size.
     Base(Region),
+    /// Push the number of bytes a region holds.
+    ///
+    /// Symbolic like [`Item::Base`]: the host sizes a region when it lays the
+    /// image out, and a program that checks a length against it must not have
+    /// guessed one earlier.
+    Len(Region),
     /// Push a field's byte offset, resolved once the aggregate's layout is
     /// known. The `u32` names the hole; what it resolves to lives outside the
     /// graph.
@@ -96,7 +102,9 @@ impl Item {
             Self::Instr(instr) => instr.sp_delta(),
             Self::Load(_) => Lds64 { disp: 0 }.sp_delta(),
             Self::Store(_) => Sts64 { disp: 0 }.sp_delta(),
-            Self::Base(_) | Self::Field(_) | Self::Tag(_) => Push32 { imm: 0 }.sp_delta(),
+            Self::Base(_) | Self::Len(_) | Self::Field(_) | Self::Tag(_) => {
+                Push32 { imm: 0 }.sp_delta()
+            }
             Self::LoadField(_) => Ld64.sp_delta(),
         }
     }
@@ -289,6 +297,7 @@ fn write_item(f: &mut core::fmt::Formatter<'_>, item: Item) -> core::fmt::Result
         Item::Load(cell) => write!(f, "$load c{}", cell.index()),
         Item::Store(cell) => write!(f, "$store c{}", cell.index()),
         Item::Base(region) => write!(f, "$push .{}", region_name(region)),
+        Item::Len(region) => write!(f, "$len .{}", region_name(region)),
         // The type and path live outside the graph, so only the hole shows.
         Item::Field(hole) => write!(f, "$field #{hole}"),
         Item::Tag(hole) => write!(f, "$tag #{hole}"),
@@ -337,7 +346,7 @@ const fn width_name(width: Width) -> &'static str {
     }
 }
 
-/// How a region is spelled after `$push .`.
+/// How a region is spelled after `$push .` or `$len .`.
 const fn region_name(region: Region) -> &'static str {
     match region {
         Region::Input => "input",

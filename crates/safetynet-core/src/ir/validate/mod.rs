@@ -139,9 +139,14 @@ fn check_item(cfg: &Cfg, at: Where, item: Item, depth: u32) -> Result<(), Invali
         // it from `Cfg::frame` in the prologue. A block that reserved its own
         // would make `sp_in` ambiguous about which side of the frame it counts.
         Item::Instr(Instr::Alloc(_) | Instr::Free(_)) => return Err(Invalid::FrameOp { at }),
-        // A region's address is resolved from the image layout, which this
-        // pass has no opinion about.
-        Item::Instr(_) | Item::Base(_) | Item::Field(_) | Item::Tag(_) | Item::LoadField(_) => {
+        // A region's address and size are resolved from the image layout, which
+        // this pass has no opinion about.
+        Item::Instr(_)
+        | Item::Base(_)
+        | Item::Len(_)
+        | Item::Field(_)
+        | Item::Tag(_)
+        | Item::LoadField(_) => {
             return Ok(());
         }
         Item::Load(cell) | Item::Store(cell) => cell,

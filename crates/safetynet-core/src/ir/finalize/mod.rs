@@ -71,6 +71,8 @@ pub struct Resolved {
     frame: FrameSize,
     /// The region-base pushes whose immediate the layout still owes.
     relocs: Vec<BaseReloc>,
+    /// The region-length pushes whose immediate the layout still owes.
+    len_relocs: Vec<LenReloc>,
     /// The field-offset pushes whose immediate a layout still owes.
     field_relocs: Vec<FieldReloc>,
     /// The discriminant pushes whose immediate the type still owes.
@@ -100,6 +102,11 @@ impl Resolved {
         &self.relocs
     }
 
+    /// The region-length relocations, each naming an instruction the layout fills.
+    pub fn len_relocs(&self) -> &[LenReloc] {
+        &self.len_relocs
+    }
+
     /// The field-offset relocations, each naming an instruction and its hole.
     pub fn field_relocs(&self) -> &[FieldReloc] {
         &self.field_relocs
@@ -122,6 +129,15 @@ pub struct BaseReloc {
     /// Index of the push in [`Resolved::code`].
     pub index: usize,
     /// The region whose base it wants.
+    pub region: Region,
+}
+
+/// A region-length push whose immediate is filled in once a layout is chosen.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LenReloc {
+    /// Index of the push in [`Resolved::code`].
+    pub index: usize,
+    /// The region whose length it wants.
     pub region: Region,
 }
 
@@ -165,6 +181,7 @@ pub fn resolve(cfg: &Cfg) -> Result<Resolved, NotFinal> {
         patches,
         starts,
         relocs,
+        len_relocs,
         field_relocs,
         tag_relocs,
         load_relocs,
@@ -181,6 +198,7 @@ pub fn resolve(cfg: &Cfg) -> Result<Resolved, NotFinal> {
         code,
         frame: cfg.frame().size(),
         relocs,
+        len_relocs,
         field_relocs,
         tag_relocs,
         load_relocs,
@@ -245,18 +263,27 @@ pub fn assemble_with<E: Encoder + Clone + 'static>(
         }
     }
 
-    let mut relocs = Vec::with_capacity(resolved.relocs.len());
+    let span = |index: usize| -> Result<(usize, usize), NotFinal> {
+        let start = offsets.get(index).copied().ok_or(NotFinal::Overflow)?;
+        let end = offsets.get(index + 1).copied().ok_or(NotFinal::Overflow)?;
+        Ok((start, end - start))
+    };
+
+    let mut relocs = Vec::with_capacity(resolved.relocs.len() + resolved.len_relocs.len());
     for base in &resolved.relocs {
-        let start = offsets.get(base.index).copied().ok_or(NotFinal::Overflow)?;
-        let end = offsets
-            .get(base.index + 1)
-            .copied()
-            .ok_or(NotFinal::Overflow)?;
+        let (start, len) = span(base.index)?;
         let region = base.region;
         let encoder = encoder.clone();
-
-        relocs.push(Reloc::new(start, end - start, move |layout, slice| {
-            reencode_base(&encoder, region, layout, slice)
+        relocs.push(Reloc::new(start, len, move |layout, slice| {
+            reencode(&encoder, base_push(region, layout), slice)
+        }));
+    }
+    for reloc in &resolved.len_relocs {
+        let (start, len) = span(reloc.index)?;
+        let region = reloc.region;
+        let encoder = encoder.clone();
+        relocs.push(Reloc::new(start, len, move |layout, slice| {
+            reencode(&encoder, len_push(region, layout), slice)
         }));
     }
 
@@ -366,7 +393,20 @@ impl Reloc {
             .encoded_len(Push32 { imm: 0 }.into())
             .unwrap_or_default();
         Self::new(at, len, move |layout, slice| {
-            reencode_base(&encoder, region, layout, slice)
+            reencode(&encoder, base_push(region, layout), slice)
+        })
+    }
+
+    /// The region-length relocation: re-encode the region's size as a `Push32`
+    /// with the encoder `E`, the way [`region_base`](Self::region_base) does
+    /// its address.
+    pub fn region_len<E: Encoder + Default + 'static>(at: usize, region: Region) -> Self {
+        let encoder = E::default();
+        let len = encoder
+            .encoded_len(Push32 { imm: 0 }.into())
+            .unwrap_or_default();
+        Self::new(at, len, move |layout, slice| {
+            reencode(&encoder, len_push(region, layout), slice)
         })
     }
 }
@@ -389,17 +429,19 @@ fn base_push(region: Region, layout: &Layout) -> Instr {
     .into()
 }
 
-/// Re-encodes a region base with `encoder` and writes it over `slice`.
-fn reencode_base<E: Encoder>(
-    encoder: &E,
-    region: Region,
-    layout: &Layout,
-    slice: &mut [u8],
-) -> Result<(), NotFinal> {
+/// The push a region length lowers to: a `u32` like the address, since a
+/// region is a span of the same address space.
+fn len_push(region: Region, layout: &Layout) -> Instr {
+    Push32 {
+        imm: layout.span(region).len(),
+    }
+    .into()
+}
+
+/// Re-encodes `instr` with `encoder` and writes it over `slice`.
+fn reencode<E: Encoder>(encoder: &E, instr: Instr, slice: &mut [u8]) -> Result<(), NotFinal> {
     let mut tmp = Vec::new();
-    encoder
-        .encode(base_push(region, layout), &mut tmp)
-        .map_err(NotFinal::encode)?;
+    encoder.encode(instr, &mut tmp).map_err(NotFinal::encode)?;
     copy_reencoded(&tmp, slice)
 }
 
@@ -441,6 +483,8 @@ struct Emitted {
     starts: Vec<usize>,
     /// The region-base pushes left as placeholders.
     relocs: Vec<BaseReloc>,
+    /// The region-length pushes left as placeholders.
+    len_relocs: Vec<LenReloc>,
     /// The field-offset holes left as placeholders.
     field_relocs: Vec<FieldReloc>,
     /// The discriminant holes left as placeholders.
@@ -485,6 +529,7 @@ fn emit(cfg: &Cfg, order: &[BlockId]) -> Result<Emitted, NotFinal> {
     let mut code = Vec::new();
     let mut patches = Vec::new();
     let mut relocs = Vec::new();
+    let mut len_relocs = Vec::new();
     let mut field_relocs = Vec::new();
     let mut tag_relocs = Vec::new();
     let mut load_relocs = Vec::new();
@@ -510,11 +555,15 @@ fn emit(cfg: &Cfg, order: &[BlockId]) -> Result<Emitted, NotFinal> {
                 item: index,
             };
 
-            // A region base is the one thing layout still owes: emit a placeholder
-            // and record where it sits, rather than reading an address that does
-            // not exist yet.
+            // A region's base and size are what layout still owes: emit a
+            // placeholder and record where it sits, rather than reading a number
+            // that does not exist yet.
             match *item {
                 Item::Base(region) => relocs.push(BaseReloc {
+                    index: code.len(),
+                    region,
+                }),
+                Item::Len(region) => len_relocs.push(LenReloc {
                     index: code.len(),
                     region,
                 }),
@@ -576,6 +625,7 @@ fn emit(cfg: &Cfg, order: &[BlockId]) -> Result<Emitted, NotFinal> {
         patches,
         starts,
         relocs,
+        len_relocs,
         field_relocs,
         tag_relocs,
         load_relocs,
@@ -635,8 +685,8 @@ fn patch_branches(
 fn materialize(frame: &Frame, item: Item, depth: u32, at: Where) -> Result<Instr, NotFinal> {
     let (cell, storing) = match item {
         Item::Instr(instr) => return Ok(instr),
-        // The address or offset arrives at finalize; a zero holds its place.
-        Item::Base(_) | Item::Field(_) => return Ok(Push32 { imm: 0 }.into()),
+        // The address, size or offset arrives at finalize; a zero holds its place.
+        Item::Base(_) | Item::Len(_) | Item::Field(_) => return Ok(Push32 { imm: 0 }.into()),
         // A discriminant is a whole word, so it holds a wider place.
         Item::Tag(_) => return Ok(Push64 { imm: 0 }.into()),
         // The width arrives at link; the narrowest load holds its place.
