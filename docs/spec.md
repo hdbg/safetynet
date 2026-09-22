@@ -302,13 +302,19 @@ the single source of truth for offset resolution.
 ```rust
 pub trait VmLayout {
     const LAYOUT: &'static Layout;                        // order-independent
-    const SIZE: usize;                                    // order-independent
-    fn marshal<B: ByteOrder>(&self, mem: &mut [u8]);      // host  -> VM image
-    fn unmarshal<B: ByteOrder>(mem: &[u8]) -> Self;       // VM image -> host
+    const SIZE: usize;                                    // order-independent, the fixed part
+    fn marshal<B: ByteOrder>(&self, slot: &mut [u8], tail: &mut Tail);  // host -> VM image
+    fn unmarshal<B: ByteOrder>(slot: &[u8], input: &[u8]) -> Self;      // VM image -> host
 }
 struct Layout { fields: &'static [Field] }
 struct Field  { name: &'static str, offset: u32, size: u32, nested: Option<&'static Layout> }
+struct Tail   { base: usize, bytes: Vec<u8> }             // appended after the fixed part
 ```
+
+`slot` is the field's own bytes, as before. `tail` is where a variable-length
+type appends its content, and `input` is the whole buffer a header can point
+back into. A scalar or a fixed struct ignores both, so only the types that
+need the tail see it (§6.1).
 
 The derive computes offsets from the VM's own packing rules, **not** from Rust's
 `#[repr]`, which is unspecified. Because `marshal` and guest field loads both
@@ -333,14 +339,20 @@ byte offset and a width — never a slot index:
 ```rust
 enum Ty {
     Scalar    { cell: Cell },                     // one cell, width 1/4/8
-    Slice     { ptr: Cell, len: Cell },           // two word cells
+    Region    { base: Cell, len: Cell },          // absolute address + checked length
     Aggregate { base: FrameOff, layout: LayoutRef },  // laid out in the frame
     AggRef    { cell: Cell, layout: LayoutRef },      // cell holds an absolute address
 }
 struct Cell { off: u32, width: Width }            // byte offset within the frame
 ```
 
-Scalars and slices are cells. An aggregate either lives **directly in the frame**
+A `Region` is the implemented form of a slice: a byte region in `.input`
+located from its header (§6.1). Its two cells are filled once, when the loop or
+`.len()` that names it runs, and the length is the header's claim cut to the
+input's real end. It never needs the address of a frame local, which is why it
+could land before `LEA`.
+
+Scalars and regions are cells. An aggregate either lives **directly in the frame**
 — `base` is its frame offset and field access is `base + field.offset`, the same
 `LAYOUT` at a different base — or is reached through a cell holding an absolute
 address, which is how an `.input` aggregate is read without copying it. The frame
@@ -373,11 +385,10 @@ a constant index folds into `offset`, so `buf[3]` is still one `LDS8` at
 A *dynamic* index is a different matter, and it exposes a real gap: `LDS` takes
 its displacement as an immediate, so a computed index cannot go in one, and the
 fallback of computing an absolute address needs `SP`, which no instruction
-produces. **There is currently no way to take the address of a frame local**, and
-§5's own `Slice { ptr, len }` already depends on being able to: the `ptr` cell is
-specified to hold an absolute address, and for a frame-resident array nothing can
-compute one. The fix is one opcode using the displacement machinery that already
-exists:
+produces. **There is currently no way to take the address of a frame local.** A
+`Region` (§5) gets by because its content lives in `.input`, whose base is a
+`$push`; a frame-resident array has no such base, and nothing can compute one.
+The fix is one opcode using the displacement machinery that already exists:
 
 ```
 LEA k      push SP − k        sp_delta = +8
@@ -416,6 +427,21 @@ return slot) arrives with marshalling; until then a program's result is the word
 on top of the stack when it halts. Reserving either early buys nothing precisely
 *because* bases are computed: adding a region later shifts what follows it and
 breaks nothing, since both sides read the layout.
+
+`.input` is a **fixed part followed by a tail**. The fixed part is the
+parameters' `VmLayout` packing, sized at compile time. A variable-length field
+(`Bytes`, `String`, `Vec<u8>`) occupies eight bytes of it — a header of
+`off: u32, len: u32` — and its content is appended to the tail by `marshal`,
+with `off` measured from the start of `.input`. Every field offset therefore
+stays a compile-time constant and the linker (§10) resolves `body.off` and
+`body.len` like any other path; only the *content* has a runtime length, and
+`.input` is sized at run time to hold it.
+
+The header is data, and data is not trusted: before a region is walked the
+program checks `base + len` against the end of `.input`, pushed through the
+`$len .input` symbol the layout resolves beside the base, and a header that
+points past the input describes an empty region. That check is what lets the
+walk use a plain `ld8` on a computed address with no further guard.
 
 What separates the three that exist is **who sizes a region and who writes it**.
 `.input` is sized by the caller's types and filled by the host; `.scratch` is
@@ -594,8 +620,9 @@ The shapes:
   `Br` whose zero arm is next; `jz` is the reverse; `br b1, b2` names both when
   neither follows; `switch [b0, b1] default b2` spells its whole table.
 - **Symbols, never numbers.** `$load c0`/`$store c0` name frame cells, `$push
-  .input` pushes a region base, and `$field #0`/`$tag #0`/`$loadfield #0` show
-  the holes whose types and paths live outside the graph.
+  .input` pushes a region base and `$len .input` its size, and `$field #0`/
+  `$tag #0`/`$loadfield #0` show the holes whose types and paths live outside
+  the graph.
 
 It is an output, not a language: nothing parses it. It is what a failing
 lowerer test prints, what `SN_DUMP_IR=1` dumps (§11), and the before/after diff
@@ -1068,9 +1095,10 @@ readable form, `SN_DUMP_IR=1` the dump, and nothing parses it.*
   phase's exit criterion. (Since the assembler's removal the property survives as
   core's `decode(encode(x)) == x` suite, both orders.)
 - **Three overlapping representations for array-like data** — a `[u8; N]` const
-  in `.rodata`, a `Slice { ptr, len }`, and an `Aggregate` — are never unified.
+  in `.rodata`, a `Region { base, len }`, and an `Aggregate` — are never unified.
   The example's `KEY`/`CT` indexing works by implication; specify which
-  representation a const array takes and how indexing lowers for each.
+  representation a const array takes and how indexing lowers for each. (A
+  `Region` now covers input bytes; a const array and indexing remain open.)
 - **"Cannot disagree" assumes a coherent build.** Separate compilation with a
   stale artifact could desync a struct's layout between its derive site and a
   `#[safetynet]` use site. Cargo normally prevents this; state the assumption.
