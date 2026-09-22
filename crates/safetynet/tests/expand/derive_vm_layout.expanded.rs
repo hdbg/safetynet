@@ -67,14 +67,18 @@ impl ::safetynet::VmLayout for Header {
     };
     const SIZE: usize = Header::__SN_VMLAYOUT.1;
     const ALIGN: usize = Header::__SN_VMLAYOUT.2;
-    fn marshal<B: ::safetynet::ByteOrder>(&self, __mem: &mut [u8]) {
+    fn marshal<B: ::safetynet::ByteOrder>(
+        &self,
+        __mem: &mut [u8],
+        __tail: &mut ::safetynet::Tail,
+    ) {
         let __f = <Self as ::safetynet::VmLayout>::LAYOUT.fields();
         if let ::core::option::Option::Some(__fd) = __f.get(0) {
             let __o = __fd.offset() as usize;
             if let ::core::option::Option::Some(__slot) = __mem
                 .get_mut(__o..__o + __fd.size() as usize)
             {
-                ::safetynet::VmLayout::marshal::<B>(&self.seq, __slot);
+                ::safetynet::VmLayout::marshal::<B>(&self.seq, __slot, __tail);
             }
         }
         if let ::core::option::Option::Some(__fd) = __f.get(1) {
@@ -82,11 +86,11 @@ impl ::safetynet::VmLayout for Header {
             if let ::core::option::Option::Some(__slot) = __mem
                 .get_mut(__o..__o + __fd.size() as usize)
             {
-                ::safetynet::VmLayout::marshal::<B>(&self.flags, __slot);
+                ::safetynet::VmLayout::marshal::<B>(&self.flags, __slot, __tail);
             }
         }
     }
-    fn unmarshal<B: ::safetynet::ByteOrder>(__mem: &[u8]) -> Self {
+    fn unmarshal<B: ::safetynet::ByteOrder>(__mem: &[u8], __input: &[u8]) -> Self {
         let __f = <Self as ::safetynet::VmLayout>::LAYOUT.fields();
         Self {
             seq: {
@@ -97,7 +101,7 @@ impl ::safetynet::VmLayout for Header {
                     }
                     ::core::option::Option::None => &[],
                 };
-                <u32 as ::safetynet::VmLayout>::unmarshal::<B>(__sub)
+                <u32 as ::safetynet::VmLayout>::unmarshal::<B>(__sub, __input)
             },
             flags: {
                 let __sub: &[u8] = match __f.get(1) {
@@ -107,7 +111,7 @@ impl ::safetynet::VmLayout for Header {
                     }
                     ::core::option::Option::None => &[],
                 };
-                <u8 as ::safetynet::VmLayout>::unmarshal::<B>(__sub)
+                <u8 as ::safetynet::VmLayout>::unmarshal::<B>(__sub, __input)
             },
         }
     }
@@ -217,14 +221,18 @@ impl ::safetynet::VmLayout for Packet {
     };
     const SIZE: usize = Packet::__SN_VMLAYOUT.1;
     const ALIGN: usize = Packet::__SN_VMLAYOUT.2;
-    fn marshal<B: ::safetynet::ByteOrder>(&self, __mem: &mut [u8]) {
+    fn marshal<B: ::safetynet::ByteOrder>(
+        &self,
+        __mem: &mut [u8],
+        __tail: &mut ::safetynet::Tail,
+    ) {
         let __f = <Self as ::safetynet::VmLayout>::LAYOUT.fields();
         if let ::core::option::Option::Some(__fd) = __f.get(0) {
             let __o = __fd.offset() as usize;
             if let ::core::option::Option::Some(__slot) = __mem
                 .get_mut(__o..__o + __fd.size() as usize)
             {
-                ::safetynet::VmLayout::marshal::<B>(&self.kind, __slot);
+                ::safetynet::VmLayout::marshal::<B>(&self.kind, __slot, __tail);
             }
         }
         if let ::core::option::Option::Some(__fd) = __f.get(1) {
@@ -232,7 +240,7 @@ impl ::safetynet::VmLayout for Packet {
             if let ::core::option::Option::Some(__slot) = __mem
                 .get_mut(__o..__o + __fd.size() as usize)
             {
-                ::safetynet::VmLayout::marshal::<B>(&self.header, __slot);
+                ::safetynet::VmLayout::marshal::<B>(&self.header, __slot, __tail);
             }
         }
         if let ::core::option::Option::Some(__fd) = __f.get(2) {
@@ -240,7 +248,7 @@ impl ::safetynet::VmLayout for Packet {
             if let ::core::option::Option::Some(__slot) = __mem
                 .get_mut(__o..__o + __fd.size() as usize)
             {
-                ::safetynet::VmLayout::marshal::<B>(&self.len, __slot);
+                ::safetynet::VmLayout::marshal::<B>(&self.len, __slot, __tail);
             }
         }
         if let ::core::option::Option::Some(__fd) = __f.get(3) {
@@ -248,11 +256,11 @@ impl ::safetynet::VmLayout for Packet {
             if let ::core::option::Option::Some(__slot) = __mem
                 .get_mut(__o..__o + __fd.size() as usize)
             {
-                ::safetynet::VmLayout::marshal::<B>(&self.tag, __slot);
+                ::safetynet::VmLayout::marshal::<B>(&self.tag, __slot, __tail);
             }
         }
     }
-    fn unmarshal<B: ::safetynet::ByteOrder>(__mem: &[u8]) -> Self {
+    fn unmarshal<B: ::safetynet::ByteOrder>(__mem: &[u8], __input: &[u8]) -> Self {
         let __f = <Self as ::safetynet::VmLayout>::LAYOUT.fields();
         Self {
             kind: {
@@ -263,7 +271,7 @@ impl ::safetynet::VmLayout for Packet {
                     }
                     ::core::option::Option::None => &[],
                 };
-                <u8 as ::safetynet::VmLayout>::unmarshal::<B>(__sub)
+                <u8 as ::safetynet::VmLayout>::unmarshal::<B>(__sub, __input)
             },
             header: {
                 let __sub: &[u8] = match __f.get(1) {
@@ -273,7 +281,7 @@ impl ::safetynet::VmLayout for Packet {
                     }
                     ::core::option::Option::None => &[],
                 };
-                <Header as ::safetynet::VmLayout>::unmarshal::<B>(__sub)
+                <Header as ::safetynet::VmLayout>::unmarshal::<B>(__sub, __input)
             },
             len: {
                 let __sub: &[u8] = match __f.get(2) {
@@ -283,7 +291,7 @@ impl ::safetynet::VmLayout for Packet {
                     }
                     ::core::option::Option::None => &[],
                 };
-                <u16 as ::safetynet::VmLayout>::unmarshal::<B>(__sub)
+                <u16 as ::safetynet::VmLayout>::unmarshal::<B>(__sub, __input)
             },
             tag: {
                 let __sub: &[u8] = match __f.get(3) {
@@ -293,7 +301,7 @@ impl ::safetynet::VmLayout for Packet {
                     }
                     ::core::option::Option::None => &[],
                 };
-                <u64 as ::safetynet::VmLayout>::unmarshal::<B>(__sub)
+                <u64 as ::safetynet::VmLayout>::unmarshal::<B>(__sub, __input)
             },
         }
     }

@@ -158,14 +158,64 @@ pub trait VmLayout: Sized {
     /// Alignment: a scalar's is its size, an aggregate's its widest field.
     const ALIGN: usize;
 
-    /// Writes `self` into the first [`SIZE`](Self::SIZE) bytes of `mem`, in
-    /// order `B`. The caller sizes `mem`; padding between fields is left as it
-    /// was found.
-    fn marshal<B: ByteOrder>(&self, mem: &mut [u8]);
+    /// Writes `self` into the first [`SIZE`](Self::SIZE) bytes of `slot`, in
+    /// order `B`. The caller sizes `slot`; padding between fields is left as it
+    /// was found. Content that outgrows the slot goes into `tail`, which only a
+    /// variable-length type touches.
+    fn marshal<B: ByteOrder>(&self, slot: &mut [u8], tail: &mut Tail);
 
-    /// Reads a value back out of `mem`, interpreting multi-byte fields in order
-    /// `B`. The inverse of [`marshal`](Self::marshal).
-    fn unmarshal<B: ByteOrder>(mem: &[u8]) -> Self;
+    /// Reads a value back out of `slot`, interpreting multi-byte fields in order
+    /// `B`. `input` is the whole buffer `slot` was cut from, for a header that
+    /// points past its own slot. The inverse of [`marshal`](Self::marshal).
+    fn unmarshal<B: ByteOrder>(slot: &[u8], input: &[u8]) -> Self;
+}
+
+/// Bytes appended after an aggregate's fixed part: where a variable-length
+/// field's content goes, and the offset it is found at again.
+///
+/// The fixed part keeps every field at a constant offset; the tail is what
+/// lets a field's *content* have a runtime length without moving anything.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct Tail {
+    base: usize,
+    bytes: Vec<u8>,
+}
+
+impl Tail {
+    /// An empty tail that begins `base` bytes into the input: the fixed part's
+    /// size.
+    pub const fn new(base: usize) -> Self {
+        Self {
+            base,
+            bytes: Vec::new(),
+        }
+    }
+
+    /// Appends `bytes`, returning where they start in the input and how many
+    /// there are, as a header records them.
+    ///
+    /// # Panics
+    ///
+    /// When the offset or the length does not fit a header field. Both are
+    /// host-side sizes, so this is a caller's bug rather than untrusted input.
+    pub fn push(&mut self, bytes: &[u8]) -> (u32, u32) {
+        let off = self.base + self.bytes.len();
+        let (Ok(off), Ok(len)) = (u32::try_from(off), u32::try_from(bytes.len())) else {
+            panic!("safetynet: a byte region is too long for its header");
+        };
+        self.bytes.extend_from_slice(bytes);
+        (off, len)
+    }
+
+    /// The bytes appended so far.
+    pub fn as_slice(&self) -> &[u8] {
+        &self.bytes
+    }
+
+    /// Takes the appended bytes.
+    pub fn into_bytes(self) -> Vec<u8> {
+        self.bytes
+    }
 }
 
 /// A scalar is a degenerate layout: no fields, and its own bytes are the whole
@@ -181,14 +231,14 @@ macro_rules! byte_layout {
             const SIZE: usize = 1;
             const ALIGN: usize = 1;
 
-            fn marshal<B: ByteOrder>(&self, mem: &mut [u8]) {
-                if let Some(slot) = mem.first_mut() {
-                    *slot = *self as u8;
+            fn marshal<B: ByteOrder>(&self, slot: &mut [u8], _: &mut Tail) {
+                if let Some(first) = slot.first_mut() {
+                    *first = *self as u8;
                 }
             }
 
-            fn unmarshal<B: ByteOrder>(mem: &[u8]) -> Self {
-                let $byte = mem.first().copied().unwrap_or_default();
+            fn unmarshal<B: ByteOrder>(slot: &[u8], _: &[u8]) -> Self {
+                let $byte = slot.first().copied().unwrap_or_default();
                 $from
             }
         }
@@ -208,15 +258,15 @@ macro_rules! word_layout {
             const SIZE: usize = $size;
             const ALIGN: usize = $size;
 
-            fn marshal<B: ByteOrder>(&self, mem: &mut [u8]) {
-                if let Some(slot) = mem.get_mut(..$size) {
-                    slot.copy_from_slice(&B::$write(*self as $unsigned));
+            fn marshal<B: ByteOrder>(&self, slot: &mut [u8], _: &mut Tail) {
+                if let Some(bytes) = slot.get_mut(..$size) {
+                    bytes.copy_from_slice(&B::$write(*self as $unsigned));
                 }
             }
 
-            fn unmarshal<B: ByteOrder>(mem: &[u8]) -> Self {
-                mem.get(..$size)
-                    .and_then(|slot| slot.try_into().ok())
+            fn unmarshal<B: ByteOrder>(slot: &[u8], _: &[u8]) -> Self {
+                slot.get(..$size)
+                    .and_then(|bytes| bytes.try_into().ok())
                     .map(B::$read)
                     .unwrap_or_default() as $ty
             }
@@ -268,12 +318,12 @@ mod tests {
         const SIZE: usize = 8;
         const ALIGN: usize = 4;
 
-        fn marshal<B: ByteOrder>(&self, mem: &mut [u8]) {
+        fn marshal<B: ByteOrder>(&self, mem: &mut [u8], _: &mut Tail) {
             put(mem, 0, &B::write_u32(self.seq));
             put(mem, 4, &[self.flags]);
         }
 
-        fn unmarshal<B: ByteOrder>(mem: &[u8]) -> Self {
+        fn unmarshal<B: ByteOrder>(mem: &[u8], _: &[u8]) -> Self {
             Self {
                 seq: B::read_u32(get(mem, 0)),
                 flags: get::<1>(mem, 4)[0],
@@ -299,18 +349,18 @@ mod tests {
         const SIZE: usize = 24;
         const ALIGN: usize = 8;
 
-        fn marshal<B: ByteOrder>(&self, mem: &mut [u8]) {
+        fn marshal<B: ByteOrder>(&self, mem: &mut [u8], tail: &mut Tail) {
             put(mem, 0, &[self.kind]);
             self.header
-                .marshal::<B>(mem.get_mut(4..12).expect("header fits"));
+                .marshal::<B>(mem.get_mut(4..12).expect("header fits"), tail);
             put(mem, 12, &B::write_u16(self.len));
             put(mem, 16, &B::write_u64(self.tag));
         }
 
-        fn unmarshal<B: ByteOrder>(mem: &[u8]) -> Self {
+        fn unmarshal<B: ByteOrder>(mem: &[u8], input: &[u8]) -> Self {
             Self {
                 kind: get::<1>(mem, 0)[0],
-                header: Header::unmarshal::<B>(mem.get(4..12).expect("header fits")),
+                header: Header::unmarshal::<B>(mem.get(4..12).expect("header fits"), input),
                 len: B::read_u16(get(mem, 12)),
                 tag: B::read_u64(get(mem, 16)),
             }
@@ -341,11 +391,16 @@ mod tests {
         }
     }
 
+    /// A tail for a fixed part of `Packet`'s size, which no scalar ever touches.
+    fn tail() -> Tail {
+        Tail::new(Packet::SIZE)
+    }
+
     fn round_trips<B: ByteOrder>() {
         let packet = sample();
         let mut mem = [0u8; Packet::SIZE];
-        packet.marshal::<B>(&mut mem);
-        assert_eq!(Packet::unmarshal::<B>(&mem), packet);
+        packet.marshal::<B>(&mut mem, &mut tail());
+        assert_eq!(Packet::unmarshal::<B>(&mem, &mem), packet);
     }
 
     #[test]
@@ -363,15 +418,15 @@ mod tests {
         let packet = sample();
         let mut le = [0u8; Packet::SIZE];
         let mut be = [0u8; Packet::SIZE];
-        packet.marshal::<Le>(&mut le);
-        packet.marshal::<Be>(&mut be);
+        packet.marshal::<Le>(&mut le, &mut tail());
+        packet.marshal::<Be>(&mut be, &mut tail());
         assert_ne!(le, be);
     }
 
     #[test]
     fn fields_land_at_their_declared_offsets() {
         let mut mem = [0xeeu8; Packet::SIZE];
-        sample().marshal::<Le>(&mut mem);
+        sample().marshal::<Le>(&mut mem, &mut tail());
 
         assert_eq!(mem.first(), Some(&0xa7), "kind");
         assert_eq!(mem.get(1..4), Some(&[0xee, 0xee, 0xee][..]), "pad kept");
@@ -439,15 +494,27 @@ mod tests {
     /// A scalar marshals its bytes and reads them back, negatives and all.
     fn scalar_round_trips<B: ByteOrder>() {
         let mut mem = [0u8; 8];
+        let mut tail = Tail::new(8);
 
-        0x1122_3344u32.marshal::<B>(&mut mem);
-        assert_eq!(u32::unmarshal::<B>(&mem), 0x1122_3344);
+        0x1122_3344u32.marshal::<B>(&mut mem, &mut tail);
+        assert_eq!(u32::unmarshal::<B>(&mem, &mem), 0x1122_3344);
 
-        (-1234i16).marshal::<B>(&mut mem);
-        assert_eq!(i16::unmarshal::<B>(&mem), -1234);
+        (-1234i16).marshal::<B>(&mut mem, &mut tail);
+        assert_eq!(i16::unmarshal::<B>(&mem, &mem), -1234);
 
-        true.marshal::<B>(&mut mem);
-        assert!(bool::unmarshal::<B>(&mem));
+        true.marshal::<B>(&mut mem, &mut tail);
+        assert!(bool::unmarshal::<B>(&mem, &mem));
+        assert!(tail.as_slice().is_empty(), "a scalar never appends");
+    }
+
+    /// Appended bytes are found at consecutive offsets past the fixed part.
+    #[test]
+    fn a_tail_hands_out_offsets_past_the_fixed_part() {
+        let mut tail = Tail::new(24);
+        assert_eq!(tail.push(b"abc"), (24, 3));
+        assert_eq!(tail.push(b""), (27, 0));
+        assert_eq!(tail.push(b"de"), (27, 2));
+        assert_eq!(tail.into_bytes(), b"abcde");
     }
 
     #[test]
@@ -465,9 +532,9 @@ mod tests {
     #[test]
     fn a_scalar_matches_the_byte_order_helper() {
         let mut mem = [0u8; 4];
-        0x0102_0304u32.marshal::<Le>(&mut mem);
+        0x0102_0304u32.marshal::<Le>(&mut mem, &mut Tail::new(4));
         assert_eq!(mem, Le::write_u32(0x0102_0304));
-        0x0102_0304u32.marshal::<Be>(&mut mem);
+        0x0102_0304u32.marshal::<Be>(&mut mem, &mut Tail::new(4));
         assert_eq!(mem, Be::write_u32(0x0102_0304));
     }
 }

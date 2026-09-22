@@ -2,7 +2,7 @@
 
 #![allow(clippy::expect_used)]
 
-use safetynet::{Be, ByteOrder, Field, Le, TypeLayout, VmLayout, VmValue};
+use safetynet::{Be, ByteOrder, Field, Le, Tail, TypeLayout, VmLayout, VmValue};
 
 #[derive(VmLayout, Clone, Copy, Debug, PartialEq, Eq)]
 struct Header {
@@ -33,7 +33,7 @@ impl VmLayout for HandHeader {
     const SIZE: usize = 8;
     const ALIGN: usize = 4;
 
-    fn marshal<B: ByteOrder>(&self, mem: &mut [u8]) {
+    fn marshal<B: ByteOrder>(&self, mem: &mut [u8], _: &mut Tail) {
         mem.get_mut(0..4)
             .expect("sized")
             .copy_from_slice(&B::write_u32(self.seq));
@@ -42,7 +42,7 @@ impl VmLayout for HandHeader {
         }
     }
 
-    fn unmarshal<B: ByteOrder>(mem: &[u8]) -> Self {
+    fn unmarshal<B: ByteOrder>(mem: &[u8], _: &[u8]) -> Self {
         let seq = mem
             .get(0..4)
             .and_then(|b| b.try_into().ok())
@@ -107,8 +107,8 @@ fn derive_matches_the_hand_impl<B: ByteOrder>() {
 
     let mut a = [0u8; Header::SIZE];
     let mut b = [0u8; HandHeader::SIZE];
-    derived.marshal::<B>(&mut a);
-    hand.marshal::<B>(&mut b);
+    derived.marshal::<B>(&mut a, &mut Tail::new(Header::SIZE));
+    hand.marshal::<B>(&mut b, &mut Tail::new(HandHeader::SIZE));
     assert_eq!(a, b);
 }
 
@@ -135,8 +135,8 @@ fn round_trips<B: ByteOrder>() {
     };
 
     let mut mem = [0u8; Packet::SIZE];
-    packet.marshal::<B>(&mut mem);
-    assert_eq!(Packet::unmarshal::<B>(&mem), packet);
+    packet.marshal::<B>(&mut mem, &mut Tail::new(Packet::SIZE));
+    assert_eq!(Packet::unmarshal::<B>(&mem, &mem), packet);
 }
 
 #[test]
