@@ -779,6 +779,7 @@ impl Lowerer {
             syn::Expr::Unary(unary) => self.lower_unary(unary, expected, depth),
             syn::Expr::Binary(binary) => self.lower_binary(binary, expected, depth),
             syn::Expr::MethodCall(call) if call.method == "typed" => self.lower_field_typed(call),
+            syn::Expr::Cast(cast) => self.lower_cast(cast, depth),
             syn::Expr::Field(field) => self.lower_field_known(field),
             other => Err(err(other, "this expression is not supported yet")),
         }
@@ -867,6 +868,23 @@ impl Lowerer {
         self.body()?.load_field(hole);
         self.normalize_load(scalar)?;
         Ok(scalar)
+    }
+
+    /// Lowers `e as T` between machine scalars.
+    ///
+    /// A value rests sign- or zero-extended to the word, so a cast is the
+    /// target's own normalization: masking narrows, shifting re-signs, and a
+    /// widening from unsigned or between signed types is already at rest.
+    fn lower_cast(&mut self, cast: &syn::ExprCast, depth: u32) -> syn::Result<Scalar> {
+        let target = Scalar::of(&cast.ty)
+            .ok_or_else(|| err(&cast.ty, "a cast must target a scalar the machine can hold"))?;
+        let source = self.lower_expr(&cast.expr, target, depth)?;
+        let at_rest =
+            source == target || (source.width < target.width && (!source.signed || target.signed));
+        if !at_rest {
+            self.normalize(target)?;
+        }
+        Ok(target)
     }
 
     /// Pushes a literal; its type is the context's, or `i32` with nothing to go
@@ -1048,6 +1066,7 @@ impl Lowerer {
             syn::Expr::MethodCall(call) if call.method == "typed" => {
                 Scalar::of(typed_argument(call)?)
             }
+            syn::Expr::Cast(cast) => Scalar::of(&cast.ty),
             syn::Expr::Field(field) => {
                 let (_, path) = field_path(field).ok()?;
                 self.field_types
@@ -1257,6 +1276,7 @@ fn is_value_expr(expr: &syn::Expr) -> bool {
             | syn::Expr::Binary(_)
             | syn::Expr::Field(_)
             | syn::Expr::MethodCall(_)
+            | syn::Expr::Cast(_)
             | syn::Expr::Block(_)
     )
 }
