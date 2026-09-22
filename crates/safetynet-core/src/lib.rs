@@ -14,11 +14,13 @@ pub mod link;
 pub mod program;
 pub mod vm;
 
+mod bytes;
 mod marshal;
 mod value;
 mod width;
 
 pub use byte_order::{Be, ByteOrder, Le};
+pub use bytes::Bytes;
 pub use encoding::{Immediate, push32_immediate, push64_immediate};
 pub use image::{Image, Layout, Region};
 pub use ir::{Artifact, Reloc};
