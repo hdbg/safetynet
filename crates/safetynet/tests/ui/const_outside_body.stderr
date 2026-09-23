@@ -1,0 +1,5 @@
+error: `SEED` is not declared in this function: the macro only sees the body, so a const it reads must be declared inside it
+ --> tests/ui/const_outside_body.rs:7:9
+  |
+7 |     x ^ SEED
+  |         ^^^^

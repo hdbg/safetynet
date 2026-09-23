@@ -1,0 +1,5 @@
+error: the machine has no globals: a `static mut` could not keep its value between runs
+ --> tests/ui/static_mut.rs:5:12
+  |
+5 |     static mut CALLS: u32 = 0;
+  |            ^^^

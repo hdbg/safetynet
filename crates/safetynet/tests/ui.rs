@@ -10,6 +10,8 @@ fn ui() {
     t.pass("tests/ui/bytes_iter.rs");
     t.pass("tests/ui/consts.rs");
     t.compile_fail("tests/ui/iter_scalar_field.rs");
+    t.compile_fail("tests/ui/const_outside_body.rs");
+    t.compile_fail("tests/ui/static_mut.rs");
     t.compile_fail("tests/ui/u16_field.rs");
     t.compile_fail("tests/ui/u16_param.rs");
     t.compile_fail("tests/ui/wrong_field_type.rs");

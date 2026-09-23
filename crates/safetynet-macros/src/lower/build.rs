@@ -73,6 +73,12 @@ pub(super) struct RegionCells {
 /// Why a `for` iterable was refused.
 const FOR_ITERABLE: &str = "a `for` loop must iterate a range `a..b` or the `.iter()` of a byte region or a constant table";
 
+/// Why a path with more than one segment was refused: the macro sees the
+/// function's tokens and nothing else, so `Self::X` or `m::X` names something
+/// it cannot read.
+const OUTSIDE_PATH: &str = "a path to an item outside the function is not lowered; \
+                            declare the const inside the body";
+
 /// Why a const's type was refused.
 const CONST_TYPE: &str =
     "a const must be a scalar the machine can hold, an array of them, or a `&str`";
@@ -856,9 +862,10 @@ impl Lowerer {
                 })),
                 (_, Some(root)) => match self.lookup(&root.to_string()) {
                     Some(Binding::Table(table)) => Ok(Receiver::Table(table)),
-                    _ => Err(err(path, NOT_A_RECEIVER)),
+                    Some(_) => Err(err(path, NOT_A_RECEIVER)),
+                    None => Err(undeclared(root)),
                 },
-                _ => Err(err(path, NOT_A_RECEIVER)),
+                _ => Err(err(path, OUTSIDE_PATH)),
             },
             syn::Expr::MethodCall(call) => {
                 let receiver = self.classify(&call.receiver)?;
@@ -1383,7 +1390,7 @@ impl Lowerer {
         let name = path
             .path
             .get_ident()
-            .ok_or_else(|| err(path, "expected a parameter or local"))?;
+            .ok_or_else(|| err(path, OUTSIDE_PATH))?;
         match self.lookup(&name.to_string()) {
             Some(Binding::Param { offset, ty }) => {
                 self.push_base(Region::Input)?;
@@ -1408,7 +1415,7 @@ impl Lowerer {
                 name,
                 "a constant table is a place: walk it with `.iter()`, index it, or take its `.len()`",
             )),
-            None => Err(err(name, "no such parameter or local")),
+            None => Err(undeclared(name)),
         }
     }
 
@@ -2051,6 +2058,26 @@ fn reject_odd_signature(func: &syn::ItemFn) -> syn::Result<()> {
         return Err(err(&sig.generics, "generics are not supported"));
     }
     Ok(())
+}
+
+/// The refusal for a name nothing in scope binds. A name spelled like a
+/// constant most likely is one, declared where the macro cannot see it, so
+/// that case says where to put it.
+fn undeclared(name: &syn::Ident) -> syn::Error {
+    let spelled = name.to_string();
+    let constant_case = spelled.chars().any(|c| c.is_ascii_uppercase())
+        && !spelled.chars().any(|c| c.is_ascii_lowercase());
+    if constant_case {
+        err(
+            name,
+            &format!(
+                "`{spelled}` is not declared in this function: the macro only sees the body, \
+                 so a const it reads must be declared inside it"
+            ),
+        )
+    } else {
+        err(name, "no such parameter or local")
+    }
 }
 
 /// A refusal pointed at the offending syntax.

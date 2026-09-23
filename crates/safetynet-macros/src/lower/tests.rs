@@ -450,7 +450,10 @@ fn a_const_is_scoped_like_a_local() {
     assert_resolves(&graph(
         "fn f(c: bool) -> u32 { const K: u32 = 1; if c { const K: u32 = 2; return K; } K }",
     ));
-    assert!(refusal("fn f(c: bool) -> u32 { if c { const K: u32 = 2; } K }").contains("no such"));
+    assert!(
+        refusal("fn f(c: bool) -> u32 { if c { const K: u32 = 2; } K }")
+            .contains("`K` is not declared")
+    );
 }
 
 #[test]
@@ -735,4 +738,19 @@ fn an_index_must_be_a_word_into_a_table() {
             .contains("cannot be indexed")
     );
     assert!(refusal("fn f(x: u32) -> u32 { x[0] }").contains("constant table"));
+}
+
+#[test]
+fn a_const_the_macro_cannot_see_is_refused_with_where_to_put_it() {
+    let message = refusal("fn f(x: u64) -> u64 { x * SEED }");
+    assert!(message.contains("`SEED` is not declared in this function"));
+    assert!(message.contains("declared inside it"));
+    assert!(
+        refusal("fn f() -> u32 { let mut n: u32 = 0; for b in KEY.iter() { n += 1; } n }")
+            .contains("`KEY` is not declared")
+    );
+    assert!(refusal("fn f(x: u64) -> u64 { x * Self::SEED }").contains("outside the function"));
+    assert!(refusal("fn f(x: u64) -> u64 { x * consts::SEED }").contains("outside the function"));
+    assert!(refusal("fn f(x: u64) -> u64 { x * u64::MAX }").contains("outside the function"));
+    assert!(refusal("fn f(x: u64) -> u64 { x * seed }").contains("no such parameter or local"));
 }
