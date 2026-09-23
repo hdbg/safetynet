@@ -50,11 +50,13 @@ pub trait ByteOrder: sealed::Sealed + Copy + Clone + core::fmt::Debug + 'static 
 }
 
 /// Little-endian: least significant byte at the lowest address.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+#[cfg_attr(feature = "debug", derive(Debug))]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub struct Le;
 
 /// Big-endian: most significant byte at the lowest address.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+#[cfg_attr(feature = "debug", derive(Debug))]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub struct Be;
 
 impl ByteOrder for Le {
@@ -114,6 +116,8 @@ impl ByteOrder for Be {
         value.to_be_bytes()
     }
 }
+
+crate::opaque_debug!(Le, Be);
 
 #[cfg(test)]
 mod tests {

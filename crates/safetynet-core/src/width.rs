@@ -5,7 +5,8 @@
 /// An enum rather than a number, so that every read and write matches over the
 /// same three cases and a width can only ever come from an opcode or a frame
 /// cell — never from data.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[cfg_attr(feature = "debug", derive(Debug))]
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Width {
     /// One byte.
     U8,
@@ -42,3 +43,5 @@ impl Width {
         }
     }
 }
+
+crate::opaque_debug!(Width);

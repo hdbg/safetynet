@@ -33,6 +33,24 @@ use musli::{Context, Writer};
 use crate::isa::{Push32, Push64};
 use crate::{ByteOrder, Instr};
 
+crate::opaque_debug!(Immediate, Packed<B: ByteOrder>);
+crate::opaque_error!(EncodeError, DecodeError);
+
+// `thiserror` writes these conversions with the feature on.
+#[cfg(not(feature = "debug"))]
+impl From<WireError> for EncodeError {
+    fn from(error: WireError) -> Self {
+        Self(error)
+    }
+}
+
+#[cfg(not(feature = "debug"))]
+impl From<WireError> for DecodeError {
+    fn from(error: WireError) -> Self {
+        Self(error)
+    }
+}
+
 #[cfg(test)]
 mod tests;
 
@@ -125,7 +143,8 @@ pub fn encoded_len(instr: Instr) -> Result<usize, EncodeError> {
 }
 
 /// Where an instruction's fixed-width immediate lands in its encoding.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "debug", derive(Debug))]
+#[derive(Clone, Copy, PartialEq, Eq)]
 pub struct Immediate {
     /// Byte offset of the immediate within the encoded instruction.
     pub at: usize,
@@ -300,6 +319,7 @@ impl<B: ByteOrder> Default for Packed<B> {
     }
 }
 
+#[cfg(feature = "debug")]
 impl<B: ByteOrder> core::fmt::Debug for Packed<B> {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.debug_tuple("Packed").field(&B::NAME).finish()
@@ -351,15 +371,19 @@ pub trait Decoder {
     fn decode(&self, code: &[u8]) -> Result<(Instr, usize), Self::Error>;
 }
 
+// Without the feature the wire error is carried but never read: there is no
+// message to put it in.
 /// An instruction could not be turned into bytes.
-#[derive(Debug, thiserror::Error)]
-#[error("could not encode an instruction: {0}")]
-pub struct EncodeError(#[from] WireError);
+#[cfg_attr(feature = "debug", derive(Debug, thiserror::Error))]
+#[cfg_attr(feature = "debug", error("could not encode an instruction: {0}"))]
+#[cfg_attr(not(feature = "debug"), allow(dead_code))]
+pub struct EncodeError(#[cfg_attr(feature = "debug", from)] WireError);
 
 /// Bytes that do not begin an instruction.
-#[derive(Debug, thiserror::Error)]
-#[error("not a valid instruction: {0}")]
-pub struct DecodeError(#[from] WireError);
+#[cfg_attr(feature = "debug", derive(Debug, thiserror::Error))]
+#[cfg_attr(feature = "debug", error("not a valid instruction: {0}"))]
+#[cfg_attr(not(feature = "debug"), allow(dead_code))]
+pub struct DecodeError(#[cfg_attr(feature = "debug", from)] WireError);
 
 /// A [`Writer`] that discards the bytes and keeps the count.
 struct Counter(usize);

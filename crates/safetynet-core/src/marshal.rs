@@ -4,7 +4,8 @@
 use crate::ByteOrder;
 
 /// The canonical flat layout of an aggregate: its fields, in order.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "debug", derive(Debug))]
+#[derive(Clone, Copy, PartialEq, Eq)]
 pub struct TypeLayout {
     fields: &'static [Field],
 }
@@ -98,7 +99,8 @@ impl TypeLayout {
 }
 
 /// One field: its name, where it sits, how wide, and its own layout if nested.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "debug", derive(Debug))]
+#[derive(Clone, Copy, PartialEq, Eq)]
 pub struct Field {
     name: &'static str,
     offset: u32,
@@ -175,7 +177,8 @@ pub trait VmLayout: Sized {
 ///
 /// The fixed part keeps every field at a constant offset; the tail is what
 /// lets a field's *content* have a runtime length without moving anything.
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[cfg_attr(feature = "debug", derive(Debug))]
+#[derive(Clone, PartialEq, Eq, Default)]
 pub struct Tail {
     base: usize,
     bytes: Vec<u8>,
@@ -201,7 +204,7 @@ impl Tail {
     pub fn push(&mut self, bytes: &[u8]) -> (u32, u32) {
         let off = self.base + self.bytes.len();
         let (Ok(off), Ok(len)) = (u32::try_from(off), u32::try_from(bytes.len())) else {
-            panic!("safetynet: a byte region is too long for its header");
+            crate::failure::fail(crate::failure::Failure::RegionTooLong);
         };
         self.bytes.extend_from_slice(bytes);
         (off, len)
@@ -299,12 +302,15 @@ const fn str_eq(a: &str, b: &str) -> bool {
     }
 }
 
+crate::opaque_debug!(TypeLayout, Field, Tail);
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::{Be, Le};
 
-    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    #[cfg_attr(feature = "debug", derive(Debug))]
+    #[derive(Clone, Copy, PartialEq, Eq)]
     struct Header {
         seq: u32,
         flags: u8,
@@ -331,7 +337,8 @@ mod tests {
         }
     }
 
-    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    #[cfg_attr(feature = "debug", derive(Debug))]
+    #[derive(Clone, Copy, PartialEq, Eq)]
     struct Packet {
         kind: u8,
         header: Header,

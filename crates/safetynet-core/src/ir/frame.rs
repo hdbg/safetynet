@@ -7,7 +7,8 @@ use crate::{FrameSize, Width};
 /// A local *is* a cell, never a slot index. The frame being byte-granular is
 /// what lets frame layout and aggregate layout use one packing discipline
 /// instead of two.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[cfg_attr(feature = "debug", derive(Debug))]
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Cell {
     off: u16,
     width: Width,
@@ -26,7 +27,8 @@ impl Cell {
 }
 
 /// Identifies a cell within one [`Frame`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[cfg_attr(feature = "debug", derive(Debug))]
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct CellId(u16);
 
 impl CellId {
@@ -52,7 +54,8 @@ impl CellId {
 /// Offsets are `u16` because every displacement computed from them has to fit
 /// the `u16` operand of `LDS`/`STS`; a frame that could not be addressed would
 /// be a layout that fails much later, at materialization, instead of here.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[cfg_attr(feature = "debug", derive(Debug))]
+#[derive(Clone, Default, PartialEq, Eq)]
 pub struct Frame {
     cells: Vec<Cell>,
     used: u16,
@@ -132,3 +135,5 @@ impl Frame {
         self.size
     }
 }
+
+crate::opaque_debug!(Cell, CellId, Frame);

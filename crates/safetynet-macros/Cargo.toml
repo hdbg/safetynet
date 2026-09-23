@@ -13,6 +13,13 @@ readme.workspace = true
 # target binary, which is what keeps the assembler out of the shipped artifact.
 proc-macro = true
 
+[features]
+# The IR listing behind `SN_DUMP_IR` and the reason in an assembler error.
+# Never enabled from a dependency edge: a proc-macro built as a workspace
+# member has its dependencies unified with the runtime's, and the feature
+# would reach the shipped binary.
+debug = ["safetynet-core/debug"]
+
 [dependencies]
 proc-macro2.workspace = true
 quote.workspace = true
@@ -23,6 +30,8 @@ syn.workspace = true
 # Outside a compiler a span carries a position only if proc-macro2 was asked to
 # track one, and the error tests assert where an error points.
 proc-macro2 = { workspace = true, features = ["span-locations"] }
+# The lowerer tests pin the IR listing.
+safetynet-core = { workspace = true, features = ["debug"] }
 
 [lints]
 workspace = true

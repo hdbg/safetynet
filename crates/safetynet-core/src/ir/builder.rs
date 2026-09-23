@@ -9,21 +9,21 @@ use crate::{Instr, Region, Width};
 /// A block's id is handed out before the block has any content, so a branch can
 /// name a target that does not exist yet — which every loop needs, and which is
 /// why this is a builder rather than a constructor.
-#[derive(Debug)]
+#[cfg_attr(feature = "debug", derive(Debug))]
 pub struct Builder {
     frame: Frame,
     slots: Vec<Slot>,
 }
 
 /// A block that has been given an id, and may or may not have been finished.
-#[derive(Debug)]
+#[cfg_attr(feature = "debug", derive(Debug))]
 enum Slot {
     Open(BlockBody),
     Sealed(Block),
 }
 
 /// The body of a block that is still being written.
-#[derive(Debug)]
+#[cfg_attr(feature = "debug", derive(Debug))]
 pub struct BlockBody {
     sp_in: u32,
     code: Vec<Item>,
@@ -169,17 +169,21 @@ impl Builder {
 }
 
 /// A graph that could not be assembled at all.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[cfg_attr(feature = "debug", derive(Debug, thiserror::Error))]
+#[derive(Clone, Copy, PartialEq, Eq)]
 pub enum BuildError {
     /// A block id from another graph, or one never handed out.
-    #[error("block {0:?} does not exist")]
+    #[cfg_attr(feature = "debug", error("block {0:?} does not exist"))]
     NoSuchBlock(BlockId),
 
     /// A block was written to or sealed after it had already been sealed.
-    #[error("block {0:?} is already sealed")]
+    #[cfg_attr(feature = "debug", error("block {0:?} is already sealed"))]
     AlreadySealed(BlockId),
 
     /// A block was opened and never given a terminator.
-    #[error("block {0:?} has no terminator")]
+    #[cfg_attr(feature = "debug", error("block {0:?} has no terminator"))]
     NotSealed(BlockId),
 }
+
+crate::opaque_debug!(Builder, BlockBody);
+crate::opaque_error!(BuildError);

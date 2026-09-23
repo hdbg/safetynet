@@ -16,11 +16,15 @@
 use super::{BlockId, CellId, Cfg, Item};
 use crate::isa::Instr;
 
+crate::opaque_debug!(Limits, Where);
+crate::opaque_error!(Invalid);
+
 #[cfg(test)]
 mod tests;
 
 /// Whole-graph limits.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "debug", derive(Debug))]
+#[derive(Clone, Copy, PartialEq, Eq)]
 pub struct Limits {
     /// Most blocks one graph may hold.
     pub blocks: usize,
@@ -202,7 +206,8 @@ fn unreachable_block(cfg: &Cfg) -> Option<BlockId> {
 
 /// Where in a graph something went wrong, in the terms a front-end can map back
 /// to a span.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "debug", derive(Debug))]
+#[derive(Clone, Copy, PartialEq, Eq)]
 pub struct Where {
     /// The block it happened in.
     pub block: BlockId,
@@ -210,6 +215,7 @@ pub struct Where {
     pub item: usize,
 }
 
+#[cfg(feature = "debug")]
 impl core::fmt::Display for Where {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         write!(f, "block {}, item {}", self.block.index(), self.item)
@@ -217,14 +223,18 @@ impl core::fmt::Display for Where {
 }
 
 /// Why a graph is not a program.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[cfg_attr(feature = "debug", derive(Debug, thiserror::Error))]
+#[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Invalid {
     /// An edge names a block that is not in this graph.
-    #[error("block {0:?} is not in this graph")]
+    #[cfg_attr(feature = "debug", error("block {0:?} is not in this graph"))]
     NoSuchBlock(BlockId),
 
     /// The entry block claims something is already on the stack.
-    #[error("the entry block starts at depth {recorded}, but nothing is pushed yet")]
+    #[cfg_attr(
+        feature = "debug",
+        error("the entry block starts at depth {recorded}, but nothing is pushed yet")
+    )]
     EntryDepth {
         /// The depth it recorded.
         recorded: u32,
@@ -234,7 +244,10 @@ pub enum Invalid {
     ///
     /// Either the recorded number is wrong, or the path that reaches it is —
     /// and the front-end knows which, because it is the one that recorded it.
-    #[error("block {block:?} leaves depth {actual}, but {target:?} records {recorded}")]
+    #[cfg_attr(
+        feature = "debug",
+        error("block {block:?} leaves depth {actual}, but {target:?} records {recorded}")
+    )]
     DepthMismatch {
         /// The block the edge leaves.
         block: BlockId,
@@ -247,7 +260,10 @@ pub enum Invalid {
     },
 
     /// A pop with nothing to pop: the next word down belongs to the frame.
-    #[error("{at} pops past the frame: depth {depth}, effect {delta}")]
+    #[cfg_attr(
+        feature = "debug",
+        error("{at} pops past the frame: depth {depth}, effect {delta}")
+    )]
     NegativeDepth {
         /// Where it happened.
         at: Where,
@@ -258,14 +274,20 @@ pub enum Invalid {
     },
 
     /// A block reserves or releases a frame of its own.
-    #[error("{at} reserves or releases a frame; the frame belongs to the graph")]
+    #[cfg_attr(
+        feature = "debug",
+        error("{at} reserves or releases a frame; the frame belongs to the graph")
+    )]
     FrameOp {
         /// Where it happened.
         at: Where,
     },
 
     /// An access names a cell the frame does not have.
-    #[error("{at} names {cell:?}, which is not in this frame")]
+    #[cfg_attr(
+        feature = "debug",
+        error("{at} names {cell:?}, which is not in this frame")
+    )]
     NoSuchCell {
         /// Where it happened.
         at: Where,
@@ -274,7 +296,10 @@ pub enum Invalid {
     },
 
     /// The access is real, but too far back from `SP` to encode.
-    #[error("{at} needs displacement {displacement}, which does not fit")]
+    #[cfg_attr(
+        feature = "debug",
+        error("{at} needs displacement {displacement}, which does not fit")
+    )]
     DisplacementTooLarge {
         /// Where it happened.
         at: Where,
@@ -289,11 +314,14 @@ pub enum Invalid {
     /// Not unsound on its own, but its recorded depth is a claim nothing checks,
     /// and code the graph cannot reach is nearly always a lowering that lost
     /// track of an edge.
-    #[error("block {0:?} is unreachable")]
+    #[cfg_attr(feature = "debug", error("block {0:?} is unreachable"))]
     Unreachable(BlockId),
 
     /// More blocks than the limits allow.
-    #[error("{blocks} blocks exceeds the limit of {limit}")]
+    #[cfg_attr(
+        feature = "debug",
+        error("{blocks} blocks exceeds the limit of {limit}")
+    )]
     TooManyBlocks {
         /// How many the graph has.
         blocks: usize,
@@ -302,7 +330,7 @@ pub enum Invalid {
     },
 
     /// More items than the limits allow.
-    #[error("{items} items exceeds the limit of {limit}")]
+    #[cfg_attr(feature = "debug", error("{items} items exceeds the limit of {limit}"))]
     TooManyItems {
         /// How many the graph has.
         items: usize,
@@ -311,7 +339,10 @@ pub enum Invalid {
     },
 
     /// The operand stack goes deeper than the limits allow.
-    #[error("{at} reaches depth {depth}, past the limit of {limit}")]
+    #[cfg_attr(
+        feature = "debug",
+        error("{at} reaches depth {depth}, past the limit of {limit}")
+    )]
     TooDeep {
         /// Where it happened.
         at: Where,

@@ -8,10 +8,20 @@ license.workspace = true
 repository.workspace = true
 readme.workspace = true
 
+[features]
+# Human-readable forms: error messages, `Debug` output, the IR listing and
+# instruction mnemonics. Off by default so none of that text reaches a shipped
+# binary; on, it is what a failing test or `SN_DUMP_IR` prints.
+debug = ["dep:thiserror"]
+
 [dependencies]
 musli = { version = "0.1.7", default-features = false, features = ["alloc", "storage"] }
 safetynet-blackbox.workspace = true
-thiserror.workspace = true
+thiserror = { workspace = true, optional = true }
+
+[dev-dependencies]
+# The tests read errors and listings, so they build with the feature on.
+safetynet-core = { path = ".", features = ["debug"] }
 
 [lints]
 workspace = true

@@ -14,7 +14,8 @@ use crate::marshal::{Field, Tail, TypeLayout, VmLayout};
 /// compile-time constant, which is what keeps the linker `const`. `String` and
 /// `Vec<u8>` lay out exactly the same way; this type is the spelling that says
 /// so at the field.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Default)]
+#[cfg_attr(feature = "debug", derive(Debug))]
+#[derive(Clone, PartialEq, Eq, Hash, Default)]
 pub struct Bytes(Vec<u8>);
 
 impl Bytes {
@@ -291,3 +292,5 @@ mod tests {
         assert_eq!(<Vec<u8> as VmLayout>::LAYOUT, Bytes::LAYOUT);
     }
 }
+
+crate::opaque_debug!(Bytes);
