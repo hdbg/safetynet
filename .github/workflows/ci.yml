@@ -25,7 +25,21 @@ jobs:
         run: mise exec -- cargo clippy --workspace --all-targets -- -D warnings
 
       - name: test
-        run: mise exec -- cargo nextest run --all --no-fail-fast
+        run: mise exec -- cargo nextest run --all --no-fail-fast --all-features
+
+      - name: check without debug
+        run: mise exec -- cargo check --workspace --all-targets
 
       - name: release build
         run: mise exec -- cargo build --release --workspace
+
+      - name: no diagnostics in the shipped binary
+        run: |
+          leaked=$(strings target/release/safetynet-demo | grep -c -F \
+            -e 'out of fuel' -e 'the stack would' -e 'is outside memory' \
+            -e 'division by zero' -e 'is reserved' -e 'do not begin an instruction' \
+            -e 'left the code' -e 'the graph is not valid' -e 'too far to encode' \
+            -e 'too large to lay out' -e "aggregate's layout" -e 'the encoder measured' \
+            -e 'could not encode' -e 'does not fit' -e 'too long for its header' \
+            -e 'BlockId' -e 'CellId' -e 'Trap' -e 'NotFinal' || true)
+          test "$leaked" -eq 0
