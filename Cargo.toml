@@ -3,7 +3,7 @@ resolver = "3"
 members = ["crates/*"]
 
 [workspace.package]
-version = "0.1.1"
+version = "0.1.2"
 edition = "2024"
 rust-version = "1.98"
 license = "MIT"
@@ -12,9 +12,9 @@ readme = "README.md"
 
 
 [workspace.dependencies]
-safetynet-core = { path = "crates/safetynet-core", version = "0.1.1" }
-safetynet-macros = { path = "crates/safetynet-macros", version = "0.1.1" }
-safetynet-blackbox = { path = "crates/safetynet-blackbox", version = "0.1.1" }
+safetynet-core = { path = "crates/safetynet-core", version = "0.1.2" }
+safetynet-macros = { path = "crates/safetynet-macros", version = "0.1.2" }
+safetynet-blackbox = { path = "crates/safetynet-blackbox", version = "0.1.2" }
 proc-macro2 = "1"
 quote = "1"
 syn = { version = "3", features = ["full", "extra-traits"] }
