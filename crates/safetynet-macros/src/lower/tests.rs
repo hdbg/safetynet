@@ -654,3 +654,85 @@ fn a_table_needs_literal_elements_of_a_held_type() {
     assert!(refusal("fn f() -> u32 { const K: &[u16] = &[1, 2]; 0 }").contains("array of them"));
     assert!(refusal("fn f() -> u32 { const K: (u8, u8) = (1, 2); 0 }").contains("array of them"));
 }
+
+#[test]
+fn a_runtime_index_is_checked_and_aborts_past_the_table() {
+    let cfg = graph("fn f(x: u8) -> u8 { const SBOX: [u8; 4] = [3, 1, 2, 0]; SBOX[x as usize] }");
+    assert_eq!(
+        format!("{cfg:?}"),
+        "\
+.frame { c0: u64 }
+b0:
+    $push .input
+    ld8
+    $store c0
+    $load c0
+    push8 4
+    lt
+    jz b2
+b1:
+    $push .rodata
+    $load c0
+    add
+    ld8
+    halt
+b2:
+    abort
+"
+    );
+    assert_resolves(&cfg);
+}
+
+#[test]
+fn a_constant_index_folds_to_the_element_address() {
+    let cfg = graph("fn f() -> u32 { const T: [u32; 3] = [7, 8, 9]; T[2] }");
+    assert_eq!(
+        format!("{cfg:?}"),
+        "b0:\n    $push .rodata\n    push8 8\n    add\n    ld32\n    halt\n",
+        "no check: the index is known to be in bounds"
+    );
+    let cfg = graph("fn f() -> u32 { const T: [u32; 3] = [7, 8, 9]; const I: usize = 0; T[I] }");
+    assert_eq!(
+        format!("{cfg:?}"),
+        "b0:\n    $push .rodata\n    ld32\n    halt\n"
+    );
+    assert!(
+        refusal("fn f() -> u32 { const T: [u32; 3] = [7, 8, 9]; T[3] }")
+            .contains("index 3 is out of bounds for a constant of 3 elements")
+    );
+    assert!(
+        refusal("fn f() -> u32 { const T: [u32; 3] = [7, 8, 9]; const I: usize = 9; T[I] }")
+            .contains("out of bounds")
+    );
+}
+
+#[test]
+fn an_indexed_element_rests_like_a_loaded_one() {
+    let cfg = graph("fn f(x: u32) -> i8 { const T: [i8; 2] = [-1, 1]; 1 + T[x as usize] }");
+    let listing = format!("{cfg:?}");
+    assert!(listing.contains("ld8\n    push8 56\n    shl\n    push8 56\n    sar\n    add\n"));
+    assert_resolves(&cfg);
+    assert_resolves(&graph(
+        "fn f(x: u32) -> u64 { const T: [u64; 2] = [1, 2]; const S: &str = \"ab\"; T[x as usize] + S.as_bytes()[x as usize] as u64 }",
+    ));
+    assert_resolves(&graph(
+        "fn f() -> u32 { const N: usize = 3; const T: [u32; 3] = [1, 2, 3]; let mut s: u32 = 0; for i in 0..N { s += T[i]; } s }",
+    ));
+    assert_resolves(&graph(
+        "fn f(x: u32) -> bool { const T: [u8; 2] = [1, 2]; x < 2 && T[x as usize] == 2 }",
+    ));
+}
+
+#[test]
+fn an_index_must_be_a_word_into_a_table() {
+    assert!(
+        refusal("fn f(i: u32) -> u32 { const T: [u32; 2] = [1, 2]; T[i] }")
+            .contains("cast it with `as usize`")
+    );
+    assert!(refusal("fn f(p: Msg) -> u8 { p.body[0] }").contains("walk it with `.iter()`"));
+    assert!(
+        refusal("fn f() -> u32 { const T: [u32; 2] = [1, 2]; T.iter()[0] }")
+            .contains("cannot be indexed")
+    );
+    assert!(refusal("fn f(x: u32) -> u32 { x[0] }").contains("constant table"));
+}
