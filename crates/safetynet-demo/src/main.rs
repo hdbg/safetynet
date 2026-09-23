@@ -1,39 +1,35 @@
 //! Sample challenge binary: an LCG keystream cipher lowered by `#[safetynet]`.
 //!
-//! The guest accepts up to eight packed bytes and returns their ciphertext as a
-//! word. The host splits and reassembles the message because the lowerer does
-//! not yet support slices. Build in release to inspect the embedded bytecode
-//! without the compiler's reference function.
+//! The guest takes a chunk of up to eight bytes as a byte region, walks it, and
+//! returns the ciphertext packed into a word, since a run returns one word.
+//! Build in release to inspect the embedded bytecode without the compiler's
+//! reference function.
 
 use std::error::Error;
 use std::fmt::Write as _;
 
-use safetynet::{Typed, VmLayout, safetynet};
+use safetynet::{Bytes, Typed, VmLayout, safetynet};
 
 const SEED: u64 = 0x2545_f491_4f6c_dd1d;
 const MUL: u64 = 0x5851_f42d_4c95_7f2d;
 const INC: u64 = 0x1405_7b7e_f767_814f;
 
-/// One packed chunk and its position in the message.
-#[derive(Debug, Clone, Copy, VmLayout)]
+/// One chunk of the message and its position in it.
+#[derive(Debug, Clone, VmLayout)]
 struct Config {
-    input: u64,
+    chunk: Bytes,
     seed: u64,
     multiplier: u64,
     increment: u64,
     offset: u64,
-    len: u64,
     passthrough: bool,
 }
 
-/// XOR a chunk with its part of the LCG keystream. Arithmetic wraps at the VM's
-/// word width, including in debug builds. Packing is little-endian on the host.
+/// XOR a chunk with its part of the LCG keystream, packing the result
+/// little-endian. Arithmetic wraps at the VM's word width, including in debug
+/// builds.
 #[safetynet]
 fn cipher(config: Config) -> u64 {
-    if config.passthrough.typed::<bool>() {
-        return config.input.typed::<u64>();
-    }
-
     let mut state: u64 = config.seed.typed::<u64>();
     // Advance to this chunk using exponentiation of the affine LCG step.
     // This keeps each chunk independent without replaying the entire prefix.
@@ -49,32 +45,32 @@ fn cipher(config: Config) -> u64 {
         offset >>= 1;
     }
 
+    let passthrough: bool = config.passthrough.typed::<bool>();
     let mut output: u64 = 0;
-    let len: u64 = config.len.typed::<u64>();
-    for i in 0..len {
+    let mut shift: u64 = 0;
+    for byte in config.chunk.iter() {
         state = state * config.multiplier + config.increment;
-        let key: u64 = (state ^ (state >> 33)) & 0xff;
-        let byte: u64 = (config.input >> (i * 8)) & 0xff;
-        output |= (byte ^ key) << (i * 8);
+        let key: u64 = if passthrough {
+            0
+        } else {
+            (state ^ (state >> 33)) & 0xff
+        };
+        output |= ((*byte as u64) ^ key) << shift;
+        shift += 8;
     }
     output
 }
 
-/// Pack each chunk for the generated wrapper and unpack its returned word.
+/// Hand each chunk to the generated wrapper and unpack its returned word.
 fn transform(input: &[u8], passthrough: bool) -> Vec<u8> {
     let mut output = Vec::with_capacity(input.len());
     for chunk in input.chunks(8) {
-        let packed = chunk
-            .iter()
-            .enumerate()
-            .fold(0u64, |word, (i, byte)| word | (u64::from(*byte) << (i * 8)));
         let result = cipher(Config {
-            input: packed,
+            chunk: Bytes::from(chunk),
             seed: SEED,
             multiplier: MUL,
             increment: INC,
             offset: output.len() as u64,
-            len: chunk.len() as u64,
             passthrough,
         });
         output.extend(result.to_le_bytes().into_iter().take(chunk.len()));
