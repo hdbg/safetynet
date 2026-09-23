@@ -9,7 +9,7 @@ use quote::quote;
 use safetynet_core::encoding::{Packed, encode, push32_immediate};
 use safetynet_core::ir::Resolved;
 use safetynet_core::isa::{Ld8, Ld32, Ld64};
-use safetynet_core::{Be, Instr, Le, Region};
+use safetynet_core::{Be, ByteOrder, Instr, Le, Region, Width};
 use syn::Path;
 use syn::spanned::Spanned;
 
@@ -18,6 +18,57 @@ use syn::spanned::Spanned;
 pub(crate) struct FieldRef {
     pub(crate) ty: syn::Type,
     pub(crate) path: Vec<syn::Ident>,
+}
+
+/// The constants a function brings with it, laid out in `.rodata` by the
+/// lowerer and written in the artifact's byte order here.
+#[derive(Debug, Default)]
+pub(crate) struct Rodata {
+    pub(crate) items: Vec<Constant>,
+    /// Bytes the region needs, every item placed.
+    pub(crate) size: u32,
+}
+
+/// One constant table: its elements as the words they rest as, at a stride
+/// of one element width from `off`.
+#[derive(Debug)]
+pub(crate) struct Constant {
+    pub(crate) off: u32,
+    pub(crate) width: Width,
+    pub(crate) values: Vec<u64>,
+}
+
+impl Rodata {
+    /// Places a table after everything so far, aligned to its element, and
+    /// returns where it starts. `None` when the region would not fit the
+    /// address space.
+    pub(crate) fn push(&mut self, width: Width, values: Vec<u64>) -> Option<u32> {
+        let stride = u32::from(width.bytes());
+        let off = self.size.checked_next_multiple_of(stride)?;
+        let len = u32::try_from(values.len()).ok()?.checked_mul(stride)?;
+        self.size = off.checked_add(len)?;
+        self.items.push(Constant { off, width, values });
+        Some(off)
+    }
+
+    /// The region's bytes in order `B`.
+    fn bytes<B: ByteOrder>(&self) -> Option<Vec<u8>> {
+        let mut bytes = vec![0u8; usize::try_from(self.size).ok()?];
+        for constant in &self.items {
+            let stride = usize::from(constant.width.bytes());
+            let mut at = usize::try_from(constant.off).ok()?;
+            for value in &constant.values {
+                let slot = bytes.get_mut(at..at.checked_add(stride)?)?;
+                match constant.width {
+                    Width::U8 => slot.copy_from_slice(&[*value as u8]),
+                    Width::U32 => slot.copy_from_slice(&B::write_u32(*value as u32)),
+                    Width::U64 => slot.copy_from_slice(&B::write_u64(*value)),
+                }
+                at += stride;
+            }
+        }
+        Some(bytes)
+    }
 }
 
 /// The two byte orders the backend can encode against at expansion.
@@ -37,6 +88,7 @@ pub(crate) fn emit_artifact(
     order: &Path,
     resolved: &Resolved,
     field_refs: &[FieldRef],
+    rodata: &Rodata,
 ) -> syn::Result<TokenStream> {
     let which = concrete_order(order)?;
 
@@ -166,17 +218,36 @@ pub(crate) fn emit_artifact(
         }
     }
 
+    // The constants, in the same order as the code. A function with none
+    // gets an artifact with none, and no second constant to carry.
+    let constants = match which {
+        Order::Le => rodata.bytes::<Le>(),
+        Order::Be => rodata.bytes::<Be>(),
+    }
+    .ok_or_else(|| syn::Error::new(order.span(), "the constants do not fit in .rodata"))?;
+    let (rodata_const, attach) = if constants.is_empty() {
+        (quote! {}, quote! {})
+    } else {
+        let bytes = constants.iter().map(|byte| Literal::u8_suffixed(*byte));
+        (
+            quote! { const RODATA: &[u8] = &[#(#bytes),*]; },
+            quote! { .with_rodata(RODATA) },
+        )
+    };
+
     Ok(quote! {
         {
             const CODE: &[u8] = &::safetynet::link::<#len>(
                 [#(#raw),*],
                 &[#(#patches),*],
             );
+            #rodata_const
             ::safetynet::Artifact::<#order>::new(
                 CODE,
                 ::safetynet::FrameSize::new(#frame_bytes).unwrap_or_default(),
                 ::std::vec![#(#relocs),*],
             )
+            #attach
         }
     })
 }

@@ -667,3 +667,74 @@ fn a_static_in_the_body_reads_like_a_const() {
 fn a_usize_const_bounds_a_range() {
     assert_eq!(count_to_limit(), 5);
 }
+
+#[safetynet]
+fn table_sum() -> u64 {
+    const TABLE: [u64; 4] = [0x100_0000_0000, 0x10_0000, 0x400, 1];
+    let mut s: u64 = 0;
+    for v in TABLE.iter() {
+        s += *v;
+    }
+    s
+}
+
+#[safetynet]
+fn greeting_checksum() -> u32 {
+    const GREETING: &str = "hello";
+    let mut s: u32 = 0;
+    for b in GREETING.bytes() {
+        s = s * 31 + b as u32;
+    }
+    s
+}
+
+#[safetynet]
+fn signed_table_min() -> i32 {
+    static OFFSETS: &[i32] = &[5, -7, 3];
+    let mut min: i32 = 0;
+    for v in OFFSETS.iter().copied() {
+        if v < min {
+            min = v;
+        }
+    }
+    min
+}
+
+#[safetynet]
+fn xor_key(x: u8) -> u8 {
+    const KEY: [u8; 4] = [0xde, 0xad, 0xbe, 0xef];
+    const ZEROS: [u8; 16] = [0; 16];
+    let mut out: u8 = x;
+    for k in KEY.iter() {
+        out ^= *k;
+    }
+    for z in ZEROS.iter() {
+        out ^= *z;
+    }
+    out + KEY.len() as u8 + ZEROS.len() as u8
+}
+
+#[test]
+fn a_constant_table_is_walked_from_the_image() {
+    assert_eq!(table_sum(), 0x100_0000_0000 + 0x10_0000 + 0x400 + 1);
+}
+
+#[test]
+fn a_string_constant_is_walked_as_bytes() {
+    let expected = "hello"
+        .bytes()
+        .fold(0u32, |s, b| s.wrapping_mul(31).wrapping_add(u32::from(b)));
+    assert_eq!(greeting_checksum(), expected);
+}
+
+#[test]
+fn a_signed_table_keeps_its_sign() {
+    assert_eq!(signed_table_min(), -7);
+}
+
+#[test]
+fn two_tables_and_their_lengths() {
+    let folded: u8 = 0xde ^ 0xad ^ 0xbe ^ 0xef;
+    assert_eq!(xor_key(0), folded.wrapping_add(20));
+    assert_eq!(xor_key(0xff), (0xff ^ folded).wrapping_add(20));
+}

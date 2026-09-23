@@ -35,6 +35,7 @@ pub(crate) fn expand(attr: TokenStream, item: TokenStream) -> syn::Result<TokenS
         bindings,
         layouts,
         field_refs,
+        rodata,
         param_offsets,
         input_size,
         aggregate,
@@ -55,7 +56,17 @@ pub(crate) fn expand(attr: TokenStream, item: TokenStream) -> syn::Result<TokenS
     // The bytes are baked in one order; `Le` is the default until an argument
     // selects otherwise.
     let order: syn::Path = syn::parse_quote!(::safetynet::Le);
-    let program = backend::emit_artifact(&order, &resolved, &field_refs)?;
+    let program = backend::emit_artifact(&order, &resolved, &field_refs, &rodata)?;
+    let rodata_len = Literal::u32_suffixed(rodata.size);
+    // The constants are the artifact's own; a function without any has
+    // nothing to write.
+    let place_rodata = (rodata.size > 0).then(|| {
+        quote! {
+            if __sn_image.write(::safetynet::Region::Rodata, __sn_artifact.rodata()).is_none() {
+                ::safetynet::__private::fail(::safetynet::__private::Failure::ImageDoesNotFit);
+            }
+        }
+    });
 
     let name = &func.sig.ident;
     let hidden = format_ident!("__sn_ref_{name}");
@@ -93,9 +104,10 @@ pub(crate) fn expand(attr: TokenStream, item: TokenStream) -> syn::Result<TokenS
                     ::safetynet::__private::Failure::InputTooLarge,
                 ),
             };
+            let __sn_artifact = #program_fn();
             let __sn_layout = match ::safetynet::Layout::new(::safetynet::image::Sizes {
                 input: __sn_input_len,
-                rodata: 0,
+                rodata: #rodata_len,
                 scratch: 0,
                 stack: #stack,
             }) {
@@ -108,7 +120,8 @@ pub(crate) fn expand(attr: TokenStream, item: TokenStream) -> syn::Result<TokenS
             if __sn_image.write(::safetynet::Region::Input, &__sn_input).is_none() {
                 ::safetynet::__private::fail(::safetynet::__private::Failure::InputDoesNotFit);
             }
-            let __sn_program = match #program_fn().finalize(&__sn_layout) {
+            #place_rodata
+            let __sn_program = match __sn_artifact.finalize(&__sn_layout) {
                 ::core::result::Result::Ok(__sn_program) => __sn_program,
                 ::core::result::Result::Err(__sn_error) => ::safetynet::__private::fail(
                     ::safetynet::__private::Failure::NotFinal(__sn_error),

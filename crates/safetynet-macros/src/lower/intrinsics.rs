@@ -1,9 +1,10 @@
 //! The methods the subset knows, and what they are called on.
 //!
 //! The lowerer cannot see a receiver's Rust type, only its shape: a place in
-//! the aggregate parameter, or a walk one of these methods started over it. A
-//! method is looked up by that shape and its name, so adding one is a table
-//! entry and a handler, and the expression lowering names no method at all.
+//! the aggregate parameter, a constant table of the body, or a walk one of
+//! these methods started over either. A method is looked up by that shape and
+//! its name, so adding one is a table entry and a handler, and the expression
+//! lowering names no method at all.
 
 use quote::ToTokens;
 
@@ -18,19 +19,42 @@ pub(super) struct Place {
     pub(super) path: Vec<syn::Ident>,
 }
 
+/// A constant table of the body, placed in `.rodata`: where it starts, how
+/// many elements it holds, and what each one is. All three are known at
+/// expansion, so nothing about it is read from memory but the elements.
+#[derive(Clone, Copy)]
+pub(super) struct Table {
+    pub(super) off: u32,
+    pub(super) len: u32,
+    pub(super) elem: Scalar,
+}
+
+/// What a walk runs over.
+///
+/// A place carries the aggregate's type, a table three numbers; the value
+/// lives only for the one chain it classifies, so the gap costs nothing.
+#[expect(clippy::large_enum_variant)]
+#[derive(Clone)]
+pub(super) enum Source {
+    Place(Place),
+    Table(Table),
+}
+
 /// What a method is called on.
 pub(super) enum Receiver {
     Place(Place),
-    /// A walk over a place's bytes, as a `for` consumes it. Whether Rust
-    /// yields a `&u8` or a `u8` does not reach the machine: the cell holds the
-    /// byte either way.
-    Walk(Place),
+    Table(Table),
+    /// A walk over a source's elements, as a `for` consumes it. Whether Rust
+    /// yields a `&T` or a `T` does not reach the machine: the cell holds the
+    /// element either way.
+    Walk(Source),
 }
 
 /// The shape a table entry is keyed by.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) enum Kind {
     Place,
+    Table,
     Walk,
 }
 
@@ -39,6 +63,7 @@ impl Kind {
     pub(super) const fn describe(self) -> &'static str {
         match self {
             Self::Place => "a field of the aggregate parameter",
+            Self::Table => "a constant table",
             Self::Walk => "a walk over a byte region",
         }
     }
@@ -48,16 +73,29 @@ impl Receiver {
     pub(super) const fn kind(&self) -> Kind {
         match self {
             Self::Place(_) => Kind::Place,
+            Self::Table(_) => Kind::Table,
             Self::Walk(_) => Kind::Walk,
         }
     }
 
-    /// The place a value method was called on; the table only pairs value
+    /// The place a value method was called on; the table only pairs these
     /// methods with places, so anything else is a table error.
     fn place(self, node: impl ToTokens) -> syn::Result<Place> {
         match self {
             Self::Place(place) => Ok(place),
-            Self::Walk(_) => Err(internal(node, "a value method reached a walk")),
+            Self::Table(_) | Self::Walk(_) => {
+                Err(internal(node, "a place method reached elsewhere"))
+            }
+        }
+    }
+
+    /// The constant table a value method was called on.
+    fn table(self, node: impl ToTokens) -> syn::Result<Table> {
+        match self {
+            Self::Table(table) => Ok(table),
+            Self::Place(_) | Self::Walk(_) => {
+                Err(internal(node, "a table method reached elsewhere"))
+            }
         }
     }
 }
@@ -80,10 +118,11 @@ pub(super) enum Handler {
         result: Option<Scalar>,
         lower: Lower,
     },
-    /// Starts a walk over a place's bytes, for a `for` to consume.
+    /// Starts a walk over the receiver's elements, for a `for` to consume.
     Walk,
-    /// Hands the receiver back as it is: `.as_bytes()` on a place and
-    /// `.copied()` on a walk change what Rust sees, not what the machine reads.
+    /// Hands the receiver back as it is: `.as_bytes()` on a place or a table
+    /// and `.copied()` on a walk change what Rust sees, not what the machine
+    /// reads.
     Same,
 }
 
@@ -131,6 +170,33 @@ pub(super) static METHODS: &[Method] = &[
     Method {
         on: Kind::Walk,
         name: "copied",
+        turbofish: false,
+        handler: Handler::Same,
+    },
+    Method {
+        on: Kind::Table,
+        name: "len",
+        turbofish: false,
+        handler: Handler::Value {
+            result: Some(Scalar::U64),
+            lower: table_len,
+        },
+    },
+    Method {
+        on: Kind::Table,
+        name: "iter",
+        turbofish: false,
+        handler: Handler::Walk,
+    },
+    Method {
+        on: Kind::Table,
+        name: "bytes",
+        turbofish: false,
+        handler: Handler::Walk,
+    },
+    Method {
+        on: Kind::Table,
+        name: "as_bytes",
         turbofish: false,
         handler: Handler::Same,
     },
@@ -188,5 +254,17 @@ fn len(
     let place = receiver.place(call)?;
     let region = lowerer.load_region(&place, depth, call)?;
     lowerer.load(region.len)?;
+    Ok(Scalar::U64)
+}
+
+/// `TABLE.len()`: known when the table was declared, so it is an immediate.
+fn table_len(
+    lowerer: &mut Lowerer,
+    receiver: Receiver,
+    call: &syn::ExprMethodCall,
+    _: u32,
+) -> syn::Result<Scalar> {
+    let table = receiver.table(call)?;
+    lowerer.push_word(u64::from(table.len))?;
     Ok(Scalar::U64)
 }

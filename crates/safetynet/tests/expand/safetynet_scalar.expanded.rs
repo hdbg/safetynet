@@ -18,9 +18,10 @@ fn inc(x: u32) -> u32 {
             ::safetynet::__private::fail(::safetynet::__private::Failure::InputTooLarge)
         }
     };
+    let __sn_artifact = __sn_program_inc();
     let __sn_layout = match ::safetynet::Layout::new(::safetynet::image::Sizes {
         input: __sn_input_len,
-        rodata: 0,
+        rodata: 0u32,
         scratch: 0,
         stack: 4096u32,
     }) {
@@ -35,7 +36,7 @@ fn inc(x: u32) -> u32 {
     if __sn_image.write(::safetynet::Region::Input, &__sn_input).is_none() {
         ::safetynet::__private::fail(::safetynet::__private::Failure::InputDoesNotFit);
     }
-    let __sn_program = match __sn_program_inc().finalize(&__sn_layout) {
+    let __sn_program = match __sn_artifact.finalize(&__sn_layout) {
         ::core::result::Result::Ok(__sn_program) => __sn_program,
         ::core::result::Result::Err(__sn_error) => {
             ::safetynet::__private::fail(

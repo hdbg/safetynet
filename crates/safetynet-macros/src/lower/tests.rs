@@ -489,3 +489,168 @@ fn a_static_mut_and_other_items_are_refused() {
     assert!(refusal("fn f() -> u32 { struct S; 0 }").contains("only `const` and `static`"));
     assert!(refusal("fn f() -> u32 { fn g() {} 0 }").contains("only `const` and `static`"));
 }
+
+#[test]
+fn a_constant_table_is_walked_from_rodata() {
+    let cfg = graph(
+        "fn f() -> u8 { const KEY: [u8; 3] = [1, 2, 3]; let mut x: u8 = 0; for b in KEY.iter() { x ^= *b; } x }",
+    );
+    assert_eq!(
+        format!("{cfg:?}"),
+        "\
+.frame { c0: u8, c1: u64, c2: u32, c3: u32, c4: u8 }
+b0:
+    push8 0
+    $store c0
+    $push .rodata
+    $store c1
+    push8 3
+    $store c2
+    push8 0
+    $store c3
+    jmp b1
+b1:
+    $load c3
+    $load c2
+    lt
+    jz b4
+b2:
+    $load c1
+    $load c3
+    add
+    ld8
+    $store c4
+    $load c0
+    $load c4
+    xor
+    push8 255
+    and
+    $store c0
+    jmp b3
+b3:
+    $load c3
+    push8 1
+    add
+    $store c3
+    jmp b1
+b4:
+    $load c0
+    halt
+",
+        "no header to read and no clamp: the table's place and length are known"
+    );
+    assert_resolves(&cfg);
+}
+
+#[test]
+fn a_wide_table_scales_its_index_and_a_later_one_sits_after_it() {
+    let source = "fn f() -> u64 { const T: [u64; 2] = [5, 6]; const S: &str = \"hi\"; let mut x: u64 = 0; for v in T.iter().copied() { x += v; } for b in S.bytes() { x += b as u64; } x + T.len() as u64 }";
+    let cfg = graph(source);
+    let listing = format!("{cfg:?}");
+    assert!(listing.contains("$load c3\n    push8 3\n    shl\n    add\n    ld64\n"));
+    assert!(listing.contains("$push .rodata\n    push8 16\n    add\n    $store c5\n"));
+    assert!(
+        listing.ends_with("$load c0\n    push8 2\n    add\n    halt\n"),
+        "`.len()` is an immediate"
+    );
+    assert_resolves(&cfg);
+
+    let func = syn::parse_str(source).expect("parses as a fn");
+    let rodata = lower(&func).expect("lowers").rodata;
+    assert_eq!(rodata.size, 18);
+    let placed: Vec<(u32, Vec<u64>)> = rodata
+        .items
+        .iter()
+        .map(|item| (item.off, item.values.clone()))
+        .collect();
+    assert_eq!(placed, [(0, vec![5, 6]), (16, vec![104, 105])]);
+}
+
+#[test]
+fn a_table_is_aligned_to_its_element() {
+    let func = syn::parse_str(
+        "fn f() -> u32 { const A: [u8; 3] = b\"abc\"; const B: &[u32] = &[1, 2]; const C: [i8; 2] = [-1, 1]; 0 }",
+    )
+    .expect("parses as a fn");
+    let rodata = lower(&func).expect("lowers").rodata;
+    let offs: Vec<u32> = rodata.items.iter().map(|item| item.off).collect();
+    assert_eq!(offs, [0, 4, 12], "three bytes, then a word boundary");
+    assert_eq!(rodata.size, 14);
+    assert_eq!(
+        rodata.items.get(2).map(|item| item.values.clone()),
+        Some(vec![u64::MAX, 1]),
+        "elements rest the way a load of them would"
+    );
+}
+
+#[test]
+fn every_spelling_of_a_table_resolves() {
+    for (decl, iterable) in [
+        ("const K: [u8; 2] = [1, 2]", "K.iter()"),
+        ("const K: [u8; 2] = [1, 2]", "K.iter().copied()"),
+        ("const K: &[u8; 2] = &[1, 2]", "K.iter()"),
+        ("const K: &[u8] = b\"ab\"", "K.iter()"),
+        ("const K: &[u8] = &[0u8; 2]", "K.iter()"),
+        ("const K: [u8; 0] = []", "K.iter()"),
+        ("static K: &'static str = \"ab\"", "K.bytes()"),
+        ("const K: &str = \"ab\"", "K.as_bytes().iter()"),
+        ("const K: [u32; 2] = [1, 2]", "K.iter()"),
+        ("const K: [i64; 2] = [-1, 2]", "K.iter()"),
+        ("const K: [bool; 2] = [true, false]", "K.iter()"),
+    ] {
+        for pat in ["b", "&b", "_"] {
+            assert_resolves(&graph(&format!(
+                "fn f() -> u32 {{ {decl}; let mut n: u32 = 0; for {pat} in {iterable} {{ n += 1; }} n + K.len() as u32 }}"
+            )));
+        }
+    }
+}
+
+#[test]
+fn a_table_walk_breaks_continues_and_returns() {
+    assert_resolves(&graph(
+        "fn f() -> u8 { const K: [u8; 3] = [0, 255, 7]; for b in K.iter() { if *b == 0 { continue; } if *b == 255 { break; } return *b; } 0 }",
+    ));
+}
+
+#[test]
+fn a_table_is_a_place_not_a_value() {
+    assert!(refusal("fn f() -> u32 { const K: [u8; 2] = [1, 2]; K }").contains("is a place"));
+    assert!(
+        refusal("fn f() -> u32 { const K: [u8; 2] = [1, 2]; K = [2, 3]; 0 }")
+            .contains("cannot be assigned")
+    );
+    assert!(
+        refusal("fn f() -> u32 { const K: [u8; 2] = [1, 2]; K.iter() as u32 }")
+            .contains("only a `for`")
+    );
+    assert!(
+        refusal("fn f() -> u32 { const K: [u8; 2] = [1, 2]; K.typed::<u32>() }")
+            .contains("not lowered on a constant table")
+    );
+    assert!(
+        refusal("fn f() -> u32 { const K: [u8; 2] = [1, 2]; for _ in K { } 0 }")
+            .contains("`.iter()`")
+    );
+}
+
+#[test]
+fn a_table_needs_literal_elements_of_a_held_type() {
+    assert!(
+        refusal("fn f() -> u32 { const K: [u8; 2] = [1, g()]; 0 }").contains("cannot evaluate")
+    );
+    assert!(
+        refusal("fn f() -> u32 { const K: [u8; 2] = [1 + 1, 2]; 0 }").contains("cannot evaluate")
+    );
+    assert!(
+        refusal("fn f() -> u32 { const N: usize = 2; const K: [u8; 2] = [0; N]; 0 }")
+            .contains("cannot evaluate")
+    );
+    assert!(
+        refusal("fn f() -> u32 { const K: &[u8] = b\"ab\".as_slice(); 0 }")
+            .contains("cannot evaluate")
+    );
+    assert!(refusal("fn f() -> u32 { const K: [u16; 2] = [1, 2]; 0 }").contains("array of them"));
+    assert!(refusal("fn f() -> u32 { const K: &[u16] = &[1, 2]; 0 }").contains("array of them"));
+    assert!(refusal("fn f() -> u32 { const K: (u8, u8) = (1, 2); 0 }").contains("array of them"));
+}
