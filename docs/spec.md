@@ -351,9 +351,11 @@ struct Cell { off: u32, width: Width }            // byte offset within the fram
 ```
 
 A `Region` is the implemented form of a slice: a byte region in `.input`
-located from its header (§6.1). Its two cells are filled once, when the loop or
-`.len()` that names it runs, and the length is the header's claim cut to the
-input's real end. It never needs the address of a frame local, which is why it
+located from its header (§6.1). Its two cells are filled once, when the loop,
+`.len()` or index that names it runs, and the length is the header's claim cut
+to the input's real end. `region[i]` is `base + i` behind a check of `i`
+against that length, aborting past it (§7.6); nothing about it folds, since the
+length is the host's. It never needs the address of a frame local, which is why it
 could land before `LEA`.
 
 A `Const` is a `const` or immutable `static` of the body whose type is a
@@ -461,7 +463,8 @@ The header is data, and data is not trusted: before a region is walked the
 program checks `base + len` against the end of `.input`, pushed through the
 `$len .input` symbol the layout resolves beside the base, and a header that
 points past the input describes an empty region. That check is what lets the
-walk use a plain `ld8` on a computed address with no further guard.
+walk use a plain `ld8` on a computed address with no further guard, and is
+the length an index is checked against.
 
 What separates the regions is **who sizes a region and who writes it**.
 `.input` is sized by the caller's types and filled by the host; `.rodata` is
@@ -589,7 +592,8 @@ is refused with a message that says so, and a path with more than one segment
    A literal or const index is checked at expansion and folds to an address; a
    run-time index must be a `usize` (`x as usize`, or a counter of a range
    bounded by a `usize` const), is checked against the length, and `ABORT`s
-   past it where the reference copy panics.
+   past it where the reference copy panics. A byte region in `.input` indexes
+   the same way against its clamped header length, with no folding at all.
 4. A `static` is a `const` to the machine. A `static mut` is refused: the
    machine has no globals, and a fresh image per run could not keep its value
    between calls, so the two copies would diverge.
@@ -1163,8 +1167,9 @@ readable form, `SN_DUMP_IR=1` the dump, and nothing parses it.*
   in `.rodata`, a `Region { base, len }`, and an `Aggregate` — are never unified.
   (Two of the three are now specified: a const array is a `Table` in `.rodata`
   and indexes as `base + i * size` behind a length check, §7.6; a `Region`
-  covers input bytes and is walk-only. Indexing a region with the same guard
-  against its checked length is the remaining step.)
+  covers input bytes and indexes the same way against its checked length.
+  Unifying the two behind one shadow type, and an `Aggregate` in the frame,
+  remain open.)
 - **"Cannot disagree" assumes a coherent build.** Separate compilation with a
   stale artifact could desync a struct's layout between its derive site and a
   `#[safetynet]` use site. Cargo normally prevents this; state the assumption.
