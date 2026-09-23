@@ -15,9 +15,7 @@ fn inc(x: u32) -> u32 {
     let __sn_input_len = match u32::try_from(__sn_input.len()) {
         ::core::result::Result::Ok(__sn_len) => __sn_len,
         ::core::result::Result::Err(_) => {
-            ::core::panicking::panic_fmt(
-                format_args!("safetynet: the input is too large"),
-            );
+            ::safetynet::__private::fail(::safetynet::__private::Failure::InputTooLarge)
         }
     };
     let __sn_layout = match ::safetynet::Layout::new(::safetynet::image::Sizes {
@@ -27,23 +25,21 @@ fn inc(x: u32) -> u32 {
     }) {
         ::core::option::Option::Some(__sn_layout) => __sn_layout,
         ::core::option::Option::None => {
-            ::core::panicking::panic_fmt(
-                format_args!("safetynet: the image does not fit"),
-            );
+            ::safetynet::__private::fail(
+                ::safetynet::__private::Failure::ImageDoesNotFit,
+            )
         }
     };
     let mut __sn_image = ::safetynet::Image::new(__sn_layout);
     if __sn_image.write(::safetynet::Region::Input, &__sn_input).is_none() {
-        {
-            ::core::panicking::panic_fmt(
-                format_args!("safetynet: the input does not fit"),
-            );
-        };
+        ::safetynet::__private::fail(::safetynet::__private::Failure::InputDoesNotFit);
     }
     let __sn_program = match __sn_program_inc().finalize(&__sn_layout) {
         ::core::result::Result::Ok(__sn_program) => __sn_program,
         ::core::result::Result::Err(__sn_error) => {
-            ::core::panicking::panic_fmt(format_args!("safetynet: {0}", __sn_error));
+            ::safetynet::__private::fail(
+                ::safetynet::__private::Failure::NotFinal(__sn_error),
+            )
         }
     };
     let mut __sn_vm = match ::safetynet::Vm::<::safetynet::Le>::new(__sn_image)
@@ -51,13 +47,17 @@ fn inc(x: u32) -> u32 {
     {
         ::core::result::Result::Ok(__sn_vm) => __sn_vm,
         ::core::result::Result::Err(__sn_trap) => {
-            ::core::panicking::panic_fmt(format_args!("safetynet: {0}", __sn_trap));
+            ::safetynet::__private::fail(
+                ::safetynet::__private::Failure::Trap(__sn_trap),
+            )
         }
     };
     let __sn_result = match __sn_vm.pop() {
         ::core::result::Result::Ok(__sn_word) => __sn_word,
         ::core::result::Result::Err(__sn_trap) => {
-            ::core::panicking::panic_fmt(format_args!("safetynet: {0}", __sn_trap));
+            ::safetynet::__private::fail(
+                ::safetynet::__private::Failure::Trap(__sn_trap),
+            )
         }
     };
     <u32 as ::safetynet::VmValue>::from_word(__sn_result)
