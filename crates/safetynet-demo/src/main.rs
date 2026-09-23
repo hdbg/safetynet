@@ -2,25 +2,19 @@
 //!
 //! The guest takes a chunk of up to eight bytes as a byte region, walks it, and
 //! returns the ciphertext packed into a word, since a run returns one word.
-//! Build in release to inspect the embedded bytecode without the compiler's
-//! reference function.
+//! The keystream's parameters are constants of the guest itself, folded into
+//! its bytecode; the host passes only what changes per chunk. Build in release
+//! to inspect the embedded bytecode without the compiler's reference function.
 
 use std::error::Error;
 use std::fmt::Write as _;
 
 use safetynet::{Bytes, Typed, VmLayout, safetynet};
 
-const SEED: u64 = 0x2545_f491_4f6c_dd1d;
-const MUL: u64 = 0x5851_f42d_4c95_7f2d;
-const INC: u64 = 0x1405_7b7e_f767_814f;
-
 /// One chunk of the message and its position in it.
 #[derive(Debug, Clone, VmLayout)]
 struct Config {
     chunk: Bytes,
-    seed: u64,
-    multiplier: u64,
-    increment: u64,
     offset: u64,
     passthrough: bool,
 }
@@ -30,12 +24,18 @@ struct Config {
 /// builds.
 #[safetynet]
 fn cipher(config: Config) -> u64 {
-    let mut state: u64 = config.seed.typed::<u64>();
+    // Declared here rather than at module level: the macro sees only the
+    // function's tokens, so these fold into the bytecode as immediates.
+    const SEED: u64 = 0x2545_f491_4f6c_dd1d;
+    const MUL: u64 = 0x5851_f42d_4c95_7f2d;
+    const INC: u64 = 0x1405_7b7e_f767_814f;
+
+    let mut state: u64 = SEED;
     // Advance to this chunk using exponentiation of the affine LCG step.
     // This keeps each chunk independent without replaying the entire prefix.
     let mut offset: u64 = config.offset.typed::<u64>();
-    let mut multiplier: u64 = config.multiplier.typed::<u64>();
-    let mut increment: u64 = config.increment.typed::<u64>();
+    let mut multiplier: u64 = MUL;
+    let mut increment: u64 = INC;
     while offset > 0 {
         if offset & 1 != 0 {
             state = state * multiplier + increment;
@@ -49,7 +49,7 @@ fn cipher(config: Config) -> u64 {
     let mut output: u64 = 0;
     let mut shift: u64 = 0;
     for byte in config.chunk.iter() {
-        state = state * config.multiplier + config.increment;
+        state = state * MUL + INC;
         let key: u64 = if passthrough {
             0
         } else {
@@ -67,9 +67,6 @@ fn transform(input: &[u8], passthrough: bool) -> Vec<u8> {
     for chunk in input.chunks(8) {
         let result = cipher(Config {
             chunk: Bytes::from(chunk),
-            seed: SEED,
-            multiplier: MUL,
-            increment: INC,
             offset: output.len() as u64,
             passthrough,
         });
@@ -88,7 +85,6 @@ fn hex(bytes: &[u8]) -> String {
 fn main() -> Result<(), Box<dyn Error>> {
     let plaintext: &[u8] = b"attack at dawn";
     println!("safetynet demo — lcg keystream cipher lowered with #[safetynet]");
-    println!("keystream   seed {SEED:#018x}, mul {MUL:#018x}, inc {INC:#018x}");
     println!(
         "plaintext   {}  {}",
         hex(plaintext),
@@ -116,8 +112,13 @@ mod tests {
     use super::*;
 
     /// Sequential model of the original cipher, independent of chunk packing
-    /// and the guest's LCG skip-ahead calculation.
+    /// and the guest's LCG skip-ahead calculation. The parameters are a copy
+    /// of the guest's, which nothing outside its body can read; the pinned
+    /// ciphertext below is what keeps the two from drifting apart.
     fn model(input: &[u8]) -> Vec<u8> {
+        const SEED: u64 = 0x2545_f491_4f6c_dd1d;
+        const MUL: u64 = 0x5851_f42d_4c95_7f2d;
+        const INC: u64 = 0x1405_7b7e_f767_814f;
         let mut state = SEED;
         input
             .iter()
