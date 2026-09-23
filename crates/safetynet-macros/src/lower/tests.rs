@@ -359,10 +359,22 @@ fn a_region_length_is_a_word_even_inside_a_condition() {
 
 #[test]
 fn a_region_walk_needs_the_aggregate() {
-    assert!(refusal("fn f(n: u32) -> u32 { for b in n.iter() { } n }").contains("byte region"));
+    assert!(
+        refusal("fn f(n: u32) -> u32 { for b in n.iter() { } n }").contains("aggregate parameter")
+    );
     assert!(
         refusal("fn f(p: Msg) -> u32 { let mut n: u32 = 0; for b in p.body.iter().rev() { } n }")
-            .contains("`.iter()`")
+            .contains("`.rev()` is not lowered on a walk")
+    );
+    assert!(refusal("fn f(p: Msg) -> u32 { p.body.iter() as u32 }").contains("only a `for`"));
+    assert!(
+        refusal("fn f(p: Msg) -> u32 { p.body.len().len() as u32 }").contains("has no methods")
+    );
+    assert!(
+        refusal("fn f(p: Msg) -> u32 { p.body.len::<u32>() as u32 }").contains("no type argument")
+    );
+    assert!(
+        refusal("fn f(p: Msg) -> u32 { for _ in p.body.as_bytes() { } 0 }").contains("`.iter()`")
     );
     assert!(
         refusal("fn f(p: Msg) -> u32 { for (a, b) in p.body.iter() { } 0 }")
