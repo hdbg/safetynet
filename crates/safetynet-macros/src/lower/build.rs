@@ -21,9 +21,9 @@ use safetynet_core::isa::{
 };
 use safetynet_core::{Instr, Region, WORD_SIZE, Width, Word};
 
-use super::intrinsics::{self, Handler, Place, Receiver};
+use super::intrinsics::{self, Handler, Place, Receiver, Source, Table};
 use super::ty::{self, Scalar};
-use crate::backend::FieldRef;
+use crate::backend::{FieldRef, Rodata};
 
 /// A function lowered to its graph, with what the wrapper needs to marshal for
 /// it and the binding types the call site must still prove are `VmValue`.
@@ -37,6 +37,8 @@ pub(crate) struct Lowered {
     /// Field references, indexed by the hole id in [`Item::Field`] and
     /// [`Item::LoadField`].
     pub(crate) field_refs: Vec<FieldRef>,
+    /// The constant tables the body declared, laid out in `.rodata`.
+    pub(crate) rodata: Rodata,
     /// Each scalar parameter's byte offset in `.input`, in signature order.
     pub(crate) param_offsets: Vec<u32>,
     /// Bytes the scalar parameters occupy, when there is no aggregate.
@@ -56,6 +58,8 @@ enum Binding {
     Local { cell: CellId, ty: Scalar },
     /// A `const` or `static` item of the body, folded to the word it rests as.
     Const { value: u64, ty: Scalar },
+    /// A `const` or `static` table of the body, placed in `.rodata`.
+    Table(Table),
 }
 
 /// A byte region located in the frame: where its content starts, absolutely,
@@ -67,15 +71,19 @@ pub(super) struct RegionCells {
 }
 
 /// Why a `for` iterable was refused.
-const FOR_ITERABLE: &str = "a `for` loop must iterate a range `a..b` or a byte region's `.iter()`";
+const FOR_ITERABLE: &str = "a `for` loop must iterate a range `a..b` or the `.iter()` of a byte region or a constant table";
+
+/// Why a const's type was refused.
+const CONST_TYPE: &str =
+    "a const must be a scalar the machine can hold, an array of them, or a `&str`";
 
 /// Why a const's initializer was refused.
 const CONST_INIT: &str = "a const's initializer must be a literal, an array of literals, or \
                           `[literal; N]`; the machine cannot evaluate it";
 
 /// Why a method receiver was refused.
-const NOT_A_RECEIVER: &str =
-    "only the aggregate parameter or one of its fields has methods the machine lowers";
+const NOT_A_RECEIVER: &str = "only the aggregate parameter, one of its fields, or a constant table \
+                              has methods the machine lowers";
 
 /// The blocks a `break` and a `continue` jump to for one enclosing loop.
 struct Loop {
@@ -188,6 +196,7 @@ pub(crate) fn lower(func: &syn::ItemFn) -> syn::Result<Lowered> {
         bindings,
         loops: Vec::new(),
         field_refs: Vec::new(),
+        rodata: Rodata::default(),
         field_types: HashMap::new(),
         aggregate: aggregate.clone(),
         cur: entry,
@@ -195,6 +204,7 @@ pub(crate) fn lower(func: &syn::ItemFn) -> syn::Result<Lowered> {
     };
     lowerer.lower_fn_body(&func.block)?;
     let field_refs = lowerer.field_refs;
+    let rodata = lowerer.rodata;
     let bindings = lowerer.bindings;
     let cfg = lowerer
         .builder
@@ -206,6 +216,7 @@ pub(crate) fn lower(func: &syn::ItemFn) -> syn::Result<Lowered> {
         bindings,
         layouts,
         field_refs,
+        rodata,
         param_offsets,
         input_size,
         aggregate: aggregate.map(|(_, ty)| ty),
@@ -226,6 +237,8 @@ pub(super) struct Lowerer {
     loops: Vec<Loop>,
     /// Field references, appended as field accesses are lowered.
     field_refs: Vec<FieldRef>,
+    /// The constant tables, appended as their items are lowered.
+    rodata: Rodata,
     /// Each field's scalar and named type spelling, keyed by its dotted path.
     field_types: HashMap<String, (Scalar, String)>,
     /// The single aggregate parameter's name and type, if the function has one.
@@ -376,17 +389,29 @@ impl Lowerer {
         ty: &syn::Type,
         init: &syn::Expr,
     ) -> syn::Result<()> {
-        let Some(scalar) = Scalar::held(ty) else {
-            return Err(err(ty, "a const must be a scalar the machine can hold"));
-        };
-        let value = const_scalar(init)?.ok_or_else(|| err(init, CONST_INIT))?;
-        self.bind(
-            name.to_string(),
-            Binding::Const {
-                value: at_rest(value, scalar),
-                ty: scalar,
-            },
-        )
+        if let Some(scalar) = Scalar::held(ty) {
+            let value = const_scalar(init)?.ok_or_else(|| err(init, CONST_INIT))?;
+            return self.bind(
+                name.to_string(),
+                Binding::Const {
+                    value: at_rest(value, scalar),
+                    ty: scalar,
+                },
+            );
+        }
+        let elem = table_type(ty).ok_or_else(|| err(ty, CONST_TYPE))?;
+        let values = const_elements(init)?
+            .ok_or_else(|| err(init, CONST_INIT))?
+            .into_iter()
+            .map(|value| at_rest(value, elem))
+            .collect::<Vec<_>>();
+        let len = u32::try_from(values.len())
+            .map_err(|_| err(init, "the constants do not fit in .rodata"))?;
+        let off = self
+            .rodata
+            .push(elem.width, values)
+            .ok_or_else(|| err(init, "the constants do not fit in .rodata"))?;
+        self.bind(name.to_string(), Binding::Table(Table { off, len, elem }))
     }
 
     /// Lowers a run of statements, stopping once a path has diverged.
@@ -453,7 +478,9 @@ impl Lowerer {
         match self.lookup(&name.to_string()) {
             Some(Binding::Local { cell, ty }) => Ok((cell, ty)),
             Some(Binding::Param { .. }) => Err(err(name, "a parameter cannot be assigned to")),
-            Some(Binding::Const { .. }) => Err(err(name, "a constant cannot be assigned to")),
+            Some(Binding::Const { .. } | Binding::Table(_)) => {
+                Err(err(name, "a constant cannot be assigned to"))
+            }
             None => Err(err(name, "no such local")),
         }
     }
@@ -579,8 +606,8 @@ impl Lowerer {
         match &*for_expr.expr {
             syn::Expr::Range(range) => self.lower_for_range(for_expr, range),
             syn::Expr::MethodCall(_) => match self.classify(&for_expr.expr)? {
-                Receiver::Walk(place) => self.lower_for_bytes(for_expr, &place),
-                Receiver::Place(_) => Err(err(&for_expr.expr, FOR_ITERABLE)),
+                Receiver::Walk(source) => self.lower_for_walk(for_expr, &source),
+                Receiver::Place(_) | Receiver::Table(_) => Err(err(&for_expr.expr, FOR_ITERABLE)),
             },
             other => Err(err(other, FOR_ITERABLE)),
         }
@@ -623,16 +650,23 @@ impl Lowerer {
         })
     }
 
-    /// Lowers `for b in region.iter() { body }`, walking a byte region's
-    /// content from its header.
+    /// Lowers `for x in source.iter() { body }`, walking a byte region's
+    /// content from its header or a constant table from where it was placed.
     ///
-    /// Each byte is copied into a cell the binding reads, so the body sees a
-    /// `u8` where the reference copy sees a `&u8`.
-    fn lower_for_bytes(&mut self, for_expr: &syn::ExprForLoop, place: &Place) -> syn::Result<Flow> {
+    /// Each element is copied into a cell the binding reads, so the body sees
+    /// a `T` where the reference copy sees a `&T`.
+    fn lower_for_walk(
+        &mut self,
+        for_expr: &syn::ExprForLoop,
+        source: &Source,
+    ) -> syn::Result<Flow> {
         let var = for_var(for_expr)?;
-        let region = self.load_region(place, 0, &for_expr.expr)?;
+        let (region, elem) = match source {
+            Source::Place(place) => (self.load_region(place, 0, &for_expr.expr)?, Scalar::U8),
+            Source::Table(table) => (self.load_table(table, &for_expr.expr)?, table.elem),
+        };
         let i_cell = self.cell(Width::U32, &for_expr.pat)?;
-        let byte_cell = self.cell(Width::U8, &for_expr.pat)?;
+        let elem_cell = self.cell(elem.width, &for_expr.pat)?;
 
         self.push_word(0)?;
         self.store(i_cell)?;
@@ -640,20 +674,61 @@ impl Lowerer {
         self.counted_loop(for_expr, i_cell, region.len, Scalar::U32, |this| {
             this.load(region.base)?;
             this.load(i_cell)?;
+            this.stride(elem)?;
             this.push_instr(Add)?;
-            this.push_instr(Ld8)?;
-            this.store(byte_cell)?;
+            this.push_instr(load(elem.width))?;
+            this.store(elem_cell)?;
             if let Some(name) = var {
                 this.bind(
                     name,
                     Binding::Local {
-                        cell: byte_cell,
-                        ty: Scalar::U8,
+                        cell: elem_cell,
+                        ty: elem,
                     },
                 )?;
             }
             Ok(())
         })
+    }
+
+    /// Scales the index on top of the stack to a byte offset: nothing for a
+    /// byte, a shift for the wider elements.
+    fn stride(&mut self, elem: Scalar) -> syn::Result<()> {
+        let shift = elem.size().trailing_zeros();
+        if shift > 0 {
+            self.push_word(u64::from(shift))?;
+            self.push_instr(Shl)?;
+        }
+        Ok(())
+    }
+
+    /// Locates a constant table: its base is `.rodata` plus where it was
+    /// placed, and its length was fixed when it was declared. Both go into
+    /// cells so a walk over it runs the same loop a region's does.
+    fn load_table(
+        &mut self,
+        table: &Table,
+        node: impl ToTokens + Copy,
+    ) -> syn::Result<RegionCells> {
+        let base = self.cell(Width::U64, node)?;
+        let len = self.cell(Width::U32, node)?;
+
+        self.push_table(table)?;
+        self.store(base)?;
+        self.push_word(u64::from(table.len))?;
+        self.store(len)?;
+
+        Ok(RegionCells { base, len })
+    }
+
+    /// Pushes the address a constant table starts at.
+    fn push_table(&mut self, table: &Table) -> syn::Result<()> {
+        self.push_base(Region::Rodata)?;
+        if table.off != 0 {
+            self.push_word(u64::from(table.off))?;
+            self.push_instr(Add)?;
+        }
+        Ok(())
     }
 
     /// The loop every `for` becomes: while `i < end`, run `prologue` then the
@@ -779,13 +854,18 @@ impl Lowerer {
                     ty: ty.clone(),
                     path: Vec::new(),
                 })),
+                (_, Some(root)) => match self.lookup(&root.to_string()) {
+                    Some(Binding::Table(table)) => Ok(Receiver::Table(table)),
+                    _ => Err(err(path, NOT_A_RECEIVER)),
+                },
                 _ => Err(err(path, NOT_A_RECEIVER)),
             },
             syn::Expr::MethodCall(call) => {
                 let receiver = self.classify(&call.receiver)?;
                 match self.method(&receiver, call)?.handler {
                     Handler::Walk => match receiver {
-                        Receiver::Place(place) => Ok(Receiver::Walk(place)),
+                        Receiver::Place(place) => Ok(Receiver::Walk(Source::Place(place))),
+                        Receiver::Table(table) => Ok(Receiver::Walk(Source::Table(table))),
                         Receiver::Walk(_) => Err(internal(call, "a walk started on a walk")),
                     },
                     Handler::Same => Ok(receiver),
@@ -1230,6 +1310,10 @@ impl Lowerer {
                 self.push_word(value)?;
                 Ok(ty)
             }
+            Some(Binding::Table(_)) => Err(err(
+                name,
+                "a constant table is a place: walk it with `.iter()`, index it, or take its `.len()`",
+            )),
             None => Err(err(name, "no such parameter or local")),
         }
     }
@@ -1365,11 +1449,12 @@ impl Lowerer {
         match expr {
             syn::Expr::Path(path) => {
                 let name = path.path.get_ident()?;
-                Some(match self.lookup(&name.to_string())? {
+                match self.lookup(&name.to_string())? {
                     Binding::Param { ty, .. }
                     | Binding::Local { ty, .. }
-                    | Binding::Const { ty, .. } => ty,
-                })
+                    | Binding::Const { ty, .. } => Some(ty),
+                    Binding::Table(_) => None,
+                }
             }
             syn::Expr::Paren(paren) => self.peek(&paren.expr),
             syn::Expr::Unary(unary) => self.peek(&unary.expr),
@@ -1473,7 +1558,7 @@ impl Lowerer {
     }
 
     /// Pushes a word with the narrowest immediate that holds it.
-    fn push_word(&mut self, value: u64) -> syn::Result<()> {
+    pub(super) fn push_word(&mut self, value: u64) -> syn::Result<()> {
         if let Ok(byte) = u8::try_from(value) {
             self.push_instr(Push8 { imm: byte })
         } else if let Ok(word) = u32::try_from(value) {
@@ -1770,6 +1855,61 @@ fn const_scalar(expr: &syn::Expr) -> syn::Result<Option<u64>> {
                 lit: syn::Lit::Int(int),
                 ..
             }) => Some(0u64.wrapping_sub(int.base10_parse()?)),
+            _ => None,
+        },
+        _ => None,
+    })
+}
+
+/// The element of a table type: `[T; N]`, `&[T; N]`, `&[T]` or `&str`, whose
+/// bytes are what `.bytes()` yields.
+fn table_type(ty: &syn::Type) -> Option<Scalar> {
+    match ty {
+        syn::Type::Reference(reference) => match &*reference.elem {
+            syn::Type::Path(path) if path.qself.is_none() && path.path.is_ident("str") => {
+                Some(Scalar::U8)
+            }
+            inner => table_type(inner),
+        },
+        syn::Type::Array(array) => Scalar::of(&array.elem),
+        syn::Type::Slice(slice) => Scalar::of(&slice.elem),
+        _ => None,
+    }
+}
+
+/// The elements a table initializer spells, or `None` when it is not one:
+/// `[a, b, c]` of literals, `[a; N]` with a literal count, a string or a
+/// byte string, any of them behind `&`. Which of these the declared type
+/// admits is the reference copy's to check.
+fn const_elements(expr: &syn::Expr) -> syn::Result<Option<Vec<u64>>> {
+    Ok(match expr {
+        syn::Expr::Paren(paren) => const_elements(&paren.expr)?,
+        syn::Expr::Reference(reference) => const_elements(&reference.expr)?,
+        syn::Expr::Array(array) => {
+            let mut values = Vec::with_capacity(array.elems.len());
+            for elem in &array.elems {
+                match const_scalar(elem)? {
+                    Some(value) => values.push(value),
+                    None => return Ok(None),
+                }
+            }
+            Some(values)
+        }
+        syn::Expr::Repeat(repeat) => {
+            let count = match &*repeat.len {
+                syn::Expr::Lit(syn::ExprLit {
+                    lit: syn::Lit::Int(int),
+                    ..
+                }) => int.base10_parse::<usize>()?,
+                _ => return Ok(None),
+            };
+            const_scalar(&repeat.expr)?.map(|value| vec![value; count])
+        }
+        syn::Expr::Lit(lit) => match &lit.lit {
+            syn::Lit::ByteStr(bytes) => {
+                Some(bytes.value().iter().map(|byte| u64::from(*byte)).collect())
+            }
+            syn::Lit::Str(string) => Some(string.value().bytes().map(u64::from).collect()),
             _ => None,
         },
         _ => None,
