@@ -22,6 +22,7 @@ fn doubled(x: u32) -> u32 {
     };
     let __sn_layout = match ::safetynet::Layout::new(::safetynet::image::Sizes {
         input: __sn_input_len,
+        rodata: 0,
         scratch: 0,
         stack: 4096u32,
     }) {

@@ -95,6 +95,7 @@ pub(crate) fn expand(attr: TokenStream, item: TokenStream) -> syn::Result<TokenS
             };
             let __sn_layout = match ::safetynet::Layout::new(::safetynet::image::Sizes {
                 input: __sn_input_len,
+                rodata: 0,
                 scratch: 0,
                 stack: #stack,
             }) {

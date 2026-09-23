@@ -216,6 +216,7 @@ fn concrete_order(order: &Path) -> syn::Result<Order> {
 fn region_tokens(region: Region) -> TokenStream {
     match region {
         Region::Input => quote!(::safetynet::Region::Input),
+        Region::Rodata => quote!(::safetynet::Region::Rodata),
         Region::Scratch => quote!(::safetynet::Region::Scratch),
         Region::Stack => quote!(::safetynet::Region::Stack),
     }

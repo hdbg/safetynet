@@ -24,6 +24,10 @@ pub enum Region {
     /// **Untrusted**: every byte of it is someone else's, so a length, an index
     /// or a discriminant read out of it is a claim to check, not a fact.
     Input,
+    /// The program's constants, sized and filled by whoever built the program
+    /// rather than by the host. One address space, so nothing stops a store
+    /// here; the lowerer never emits one.
+    Rodata,
     /// The program's own workspace, sized by what the program needs.
     ///
     /// Also the only place a program can keep something it addresses
@@ -75,6 +79,8 @@ impl Span {
 pub struct Sizes {
     /// Bytes the host will write.
     pub input: u32,
+    /// Bytes of constants the program brings with it.
+    pub rodata: u32,
     /// Bytes of workspace.
     pub scratch: u32,
     /// Bytes for the frame and the operand stack together.
@@ -86,6 +92,7 @@ pub struct Sizes {
 #[derive(Clone, Copy, PartialEq, Eq, Default)]
 pub struct Layout {
     input: Span,
+    rodata: Span,
     scratch: Span,
     stack: Span,
     size: u32,
@@ -118,6 +125,7 @@ impl Layout {
 
         Some(Self {
             input: place(&mut at, sizes.input)?,
+            rodata: place(&mut at, sizes.rodata)?,
             scratch: place(&mut at, sizes.scratch)?,
             stack: place(&mut at, sizes.stack)?,
             size: at,
@@ -131,6 +139,7 @@ impl Layout {
     pub const fn span(&self, region: Region) -> Span {
         match region {
             Region::Input => self.input,
+            Region::Rodata => self.rodata,
             Region::Scratch => self.scratch,
             Region::Stack => self.stack,
         }
@@ -219,6 +228,7 @@ mod tests {
     fn regions_are_laid_out_in_order() {
         let layout = Layout::new(Sizes {
             input: 12,
+            rodata: 3,
             scratch: 1,
             stack: 256,
         })
@@ -226,11 +236,17 @@ mod tests {
 
         let span = |region| layout.span(region);
         assert_eq!(span(Region::Input).base(), 0);
-        assert_eq!(span(Region::Scratch).base(), 16, "12 rounded up");
-        assert_eq!(span(Region::Stack).base(), 24, "1 byte still costs a word");
-        assert_eq!(layout.size(), 280);
+        assert_eq!(span(Region::Rodata).base(), 16, "12 rounded up");
+        assert_eq!(span(Region::Scratch).base(), 24, "3 bytes cost a word");
+        assert_eq!(span(Region::Stack).base(), 32, "and so does 1");
+        assert_eq!(layout.size(), 288);
 
-        for region in [Region::Input, Region::Scratch, Region::Stack] {
+        for region in [
+            Region::Input,
+            Region::Rodata,
+            Region::Scratch,
+            Region::Stack,
+        ] {
             assert_eq!(span(region).base() % 8, 0, "{region:?}");
         }
     }
@@ -283,7 +299,7 @@ mod tests {
         assert_eq!(image.region(Region::Input), b"abcd", "and nothing moved");
 
         // The padding after the region is not part of it.
-        assert_eq!(image.region(Region::Scratch), b"");
+        assert_eq!(image.region(Region::Rodata), b"");
         assert_eq!(image.memory().len(), layout.size() as usize);
     }
 }

@@ -364,6 +364,7 @@ const fn width_name(width: Width) -> &'static str {
 const fn region_name(region: Region) -> &'static str {
     match region {
         Region::Input => "input",
+        Region::Rodata => "rodata",
         Region::Scratch => "scratch",
         Region::Stack => "stack",
     }
