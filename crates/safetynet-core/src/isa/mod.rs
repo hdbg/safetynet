@@ -54,7 +54,8 @@ pub trait Op:
     + Encode<Binary>
     + for<'de> Decode<'de, Binary, Global>
 {
-    /// The assembly mnemonic.
+    /// The assembly mnemonic, a debugging aid only.
+    #[cfg(feature = "debug")]
     const MNEMONIC: &'static str;
 
     /// Net change to `SP`, in bytes; positive grows the stack.
@@ -223,13 +224,13 @@ define_ops! {
     /// Jump table. **Reserved**: no operand format is fixed yet, and executing
     /// one traps.
     Switch = "switch", sp(|_| -WORD),
-        exec(|_, _| Err(Trap::Reserved { mnemonic: Switch::MNEMONIC }));
+        exec(|_, op| Err(Trap::Reserved { instr: (*op).into() }));
 
     /// Host escape. **Reserved**: traps until there is a host table to index.
     Host {
         /// Index into the author-registered host function table.
         index: u8
-    } = "host", sp(|_| 0), exec(|_, _| Err(Trap::Reserved { mnemonic: Host::MNEMONIC }));
+    } = "host", sp(|_| 0), exec(|_, op| Err(Trap::Reserved { instr: (*op).into() }));
 }
 
 #[cfg(test)]

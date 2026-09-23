@@ -8,6 +8,11 @@ license.workspace = true
 repository.workspace = true
 readme.workspace = true
 
+[features]
+# Human-readable errors, `Debug` output and the IR listing. Off by default so
+# a shipped binary carries no such text.
+debug = ["safetynet-core/debug", "safetynet-macros/debug"]
+
 [dependencies]
 safetynet-core.workspace = true
 safetynet-macros.workspace = true

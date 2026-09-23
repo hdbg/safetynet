@@ -12,7 +12,8 @@ use musli::{Context, Decode, Encode};
 /// means the interpreter never re-checks it, and a corrupt image is rejected
 /// where its bytes are read rather than producing a program that runs and is
 /// quietly wrong.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default, Encode)]
+#[cfg_attr(feature = "debug", derive(Debug))]
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default, Encode)]
 #[musli(transparent)]
 pub struct FrameSize(u16);
 
@@ -45,6 +46,7 @@ impl FrameSize {
     }
 }
 
+#[cfg(feature = "debug")]
 impl core::fmt::Display for FrameSize {
     /// Prints the byte count, which is what an assembly operand spells.
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
@@ -65,6 +67,8 @@ where
         Self::new(raw).ok_or_else(|| cx.message(Self::WHY))
     }
 }
+
+crate::opaque_debug!(FrameSize);
 
 #[cfg(test)]
 mod tests {

@@ -15,17 +15,21 @@
 macro_rules! define_op_struct {
     ($(#[$meta:meta])* $name:ident) => {
         $(#[$meta])*
-        #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Encode, Decode)]
+        #[cfg_attr(feature = "debug", derive(Debug))]
+        #[derive(Clone, Copy, Default, PartialEq, Eq, Hash, Encode, Decode)]
         #[musli(packed)]
         pub struct $name;
+        crate::opaque_debug!($name);
     };
     ($(#[$meta:meta])* $name:ident { $($(#[$fmeta:meta])* $field:ident : $fty:ty),* $(,)? }) => {
         $(#[$meta])*
-        #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Encode, Decode)]
+        #[cfg_attr(feature = "debug", derive(Debug))]
+        #[derive(Clone, Copy, Default, PartialEq, Eq, Hash, Encode, Decode)]
         #[musli(packed)]
         pub struct $name {
             $($(#[$fmeta])* pub $field: $fty),*
         }
+        crate::opaque_debug!($name);
     };
 }
 
@@ -69,7 +73,9 @@ macro_rules! define_ops {
 
         $(
             impl Op for $name {
+                #[cfg(feature = "debug")]
                 const MNEMONIC: &'static str = $mnemonic;
+
 
                 fn sp_delta(&self) -> i32 {
                     let $sp_op: &Self = self;
@@ -98,6 +104,7 @@ macro_rules! define_ops {
             // The assembly form: mnemonic, then one operand per field, each
             // spelled by its own `Display`. Generated from the same entry as
             // the struct, so a new operand cannot be left out of the text.
+            #[cfg(feature = "debug")]
             impl core::fmt::Display for $name {
                 fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
                     f.write_str($mnemonic)?;
@@ -108,7 +115,8 @@ macro_rules! define_ops {
         )*
 
         /// One instruction: an operation together with its operands.
-        #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Encode, Decode)]
+        #[cfg_attr(feature = "debug", derive(Debug))]
+        #[derive(Clone, Copy, PartialEq, Eq, Hash, Encode, Decode)]
         pub enum Instr {
             $(
                 $(#[$meta])*
@@ -117,8 +125,11 @@ macro_rules! define_ops {
             )*
         }
 
+        crate::opaque_debug!(Instr);
+
         impl Instr {
             /// The assembly mnemonic for this instruction.
+            #[cfg(feature = "debug")]
             pub const fn mnemonic(self) -> &'static str {
                 match self { $( Self::$name(_) => $mnemonic, )* }
             }
@@ -149,6 +160,7 @@ macro_rules! define_ops {
             }
         }
 
+        #[cfg(feature = "debug")]
         impl core::fmt::Display for Instr {
             fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
                 match self { $( Self::$name(op) => core::fmt::Display::fmt(op, f), )* }

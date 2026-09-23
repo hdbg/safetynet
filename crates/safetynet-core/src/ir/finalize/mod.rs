@@ -33,6 +33,26 @@ use crate::isa::{
 };
 use crate::{ByteOrder, FrameSize, Layout, Program, Region, Width};
 
+crate::opaque_debug!(
+    Resolved,
+    BaseReloc,
+    LenReloc,
+    FieldReloc,
+    TagReloc,
+    LoadReloc,
+    Reloc,
+    Artifact<B: ByteOrder>
+);
+crate::opaque_error!(NotFinal);
+
+// `thiserror` writes this conversion with the feature on.
+#[cfg(not(feature = "debug"))]
+impl From<Invalid> for NotFinal {
+    fn from(error: Invalid) -> Self {
+        Self::Invalid(error)
+    }
+}
+
 #[cfg(test)]
 mod tests;
 
@@ -62,7 +82,8 @@ pub fn finalize_with<E: Encoder + Clone + 'static>(
 ///
 /// Everything a graph decides on its own is decided here: which block goes
 /// where, what each branch reaches, how deep the stack is at every access.
-#[derive(Debug, Clone)]
+#[cfg_attr(feature = "debug", derive(Debug))]
+#[derive(Clone)]
 pub struct Resolved {
     /// Every instruction, branches patched and frame displacements filled, with
     /// each region-base push left as a placeholder named by `relocs`.
@@ -124,7 +145,8 @@ impl Resolved {
 }
 
 /// A region-base push whose immediate is filled in once a layout is chosen.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "debug", derive(Debug))]
+#[derive(Clone, Copy, PartialEq, Eq)]
 pub struct BaseReloc {
     /// Index of the push in [`Resolved::code`].
     pub index: usize,
@@ -133,7 +155,8 @@ pub struct BaseReloc {
 }
 
 /// A region-length push whose immediate is filled in once a layout is chosen.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "debug", derive(Debug))]
+#[derive(Clone, Copy, PartialEq, Eq)]
 pub struct LenReloc {
     /// Index of the push in [`Resolved::code`].
     pub index: usize,
@@ -142,7 +165,8 @@ pub struct LenReloc {
 }
 
 /// A field-offset push whose immediate is filled in from an aggregate's layout.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "debug", derive(Debug))]
+#[derive(Clone, Copy, PartialEq, Eq)]
 pub struct FieldReloc {
     /// Index of the push in [`Resolved::code`].
     pub index: usize,
@@ -151,7 +175,8 @@ pub struct FieldReloc {
 }
 
 /// A discriminant push whose immediate is filled in from an enum type.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "debug", derive(Debug))]
+#[derive(Clone, Copy, PartialEq, Eq)]
 pub struct TagReloc {
     /// Index of the push in [`Resolved::code`].
     pub index: usize,
@@ -160,7 +185,8 @@ pub struct TagReloc {
 }
 
 /// A field load whose opcode width is filled in from an aggregate's layout.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "debug", derive(Debug))]
+#[derive(Clone, Copy, PartialEq, Eq)]
 pub struct LoadReloc {
     /// Index of the load in [`Resolved::code`].
     pub index: usize,
@@ -339,6 +365,7 @@ impl<B: ByteOrder> Artifact<B> {
     }
 }
 
+#[cfg(feature = "debug")]
 impl<B: ByteOrder> core::fmt::Debug for Artifact<B> {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.debug_struct("Artifact")
@@ -414,6 +441,7 @@ impl Reloc {
     }
 }
 
+#[cfg(feature = "debug")]
 impl core::fmt::Debug for Reloc {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.debug_struct("Reloc")
@@ -503,7 +531,8 @@ struct Emitted {
 }
 
 /// A branch whose offset is not known until every instruction has been measured.
-#[derive(Debug, Clone, Copy)]
+#[cfg_attr(feature = "debug", derive(Debug))]
+#[derive(Clone, Copy)]
 struct Patch {
     /// Index of the branch in the instruction stream.
     at: usize,
@@ -514,7 +543,8 @@ struct Patch {
 }
 
 /// The three branch shapes a terminator lowers to.
-#[derive(Debug, Clone, Copy)]
+#[cfg_attr(feature = "debug", derive(Debug))]
+#[derive(Clone, Copy)]
 enum Branch {
     Always,
     IfZero,
@@ -736,15 +766,18 @@ fn offset(offsets: &[usize], index: usize) -> Result<i64, NotFinal> {
 }
 
 /// Why a graph did not become bytecode.
-#[derive(Debug, thiserror::Error)]
+#[cfg_attr(feature = "debug", derive(Debug, thiserror::Error))]
 pub enum NotFinal {
     /// The graph does not hold up. Every displacement below rests on this, so
     /// finalization refuses to guess.
-    #[error("the graph is not valid: {0}")]
-    Invalid(#[from] Invalid),
+    #[cfg_attr(feature = "debug", error("the graph is not valid: {0}"))]
+    Invalid(#[cfg_attr(feature = "debug", from)] Invalid),
 
     /// Something the instruction set does not lower yet.
-    #[error("block {block:?} ends in `{what}`, which has no encoding yet")]
+    #[cfg_attr(
+        feature = "debug",
+        error("block {block:?} ends in `{what}`, which has no encoding yet")
+    )]
     Unsupported {
         /// The block it is in.
         block: BlockId,
@@ -753,7 +786,10 @@ pub enum NotFinal {
     },
 
     /// A branch further than a relative offset can reach.
-    #[error("a branch to {target:?} is {delta} bytes away, too far to encode")]
+    #[cfg_attr(
+        feature = "debug",
+        error("a branch to {target:?} is {delta} bytes away, too far to encode")
+    )]
     BranchTooFar {
         /// The block it aims at.
         target: BlockId,
@@ -762,12 +798,15 @@ pub enum NotFinal {
     },
 
     /// The program is larger than an offset can describe.
-    #[error("the program is too large to lay out")]
+    #[cfg_attr(feature = "debug", error("the program is too large to lay out"))]
     Overflow,
 
     /// The encoder measured one length and wrote another, which would leave
     /// every branch aimed at the wrong byte.
-    #[error("the encoder measured {measured} bytes and wrote {written}")]
+    #[cfg_attr(
+        feature = "debug",
+        error("the encoder measured {measured} bytes and wrote {written}")
+    )]
     EncoderDisagrees {
         /// What `encoded_len` promised.
         measured: i64,
@@ -776,11 +815,14 @@ pub enum NotFinal {
     },
 
     /// A field-offset hole reached this path, which has no layout to resolve it.
-    #[error("a field offset can only be resolved with the aggregate's layout")]
+    #[cfg_attr(
+        feature = "debug",
+        error("a field offset can only be resolved with the aggregate's layout")
+    )]
     FieldWithoutLayout,
 
     /// An instruction would not encode.
-    #[error("could not encode an instruction: {0}")]
+    #[cfg_attr(feature = "debug", error("could not encode an instruction: {0}"))]
     Encode(Box<dyn core::error::Error + Send + Sync>),
 }
 

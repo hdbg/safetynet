@@ -5,8 +5,12 @@
 //! and both `safetynet-macros` and the runtime depend on it. That is what keeps
 //! the encoder and the decoder from drifting: they are declared together, once.
 
+mod opaque;
+pub(crate) use opaque::{opaque_debug, opaque_error};
+
 pub mod byte_order;
 pub mod encoding;
+pub mod failure;
 pub mod image;
 pub mod ir;
 pub mod isa;
@@ -34,6 +38,7 @@ pub use value::{Same, Typed, VmValue};
 #[doc(hidden)]
 #[allow(missing_docs)]
 pub mod __private {
+    pub use crate::failure::{Failure, fail};
     pub use crate::value::sealed::Sealed;
 }
 pub use vm::{Flow, Trap, Vm};

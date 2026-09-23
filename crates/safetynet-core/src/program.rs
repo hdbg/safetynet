@@ -1,5 +1,6 @@
 //! A finalized program: bytecode, and what the machine needs to run it.
 
+#[cfg(feature = "debug")]
 use core::fmt;
 use core::marker::PhantomData;
 
@@ -42,6 +43,7 @@ impl<B: ByteOrder> Program<B> {
     }
 }
 
+#[cfg(feature = "debug")]
 impl<B: ByteOrder> fmt::Debug for Program<B> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Program")
@@ -51,3 +53,5 @@ impl<B: ByteOrder> fmt::Debug for Program<B> {
             .finish()
     }
 }
+
+crate::opaque_debug!(Program<B: ByteOrder>);

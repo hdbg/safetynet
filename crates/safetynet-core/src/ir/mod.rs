@@ -27,14 +27,19 @@ pub use finalize::{
 pub use frame::{Cell, CellId, Frame};
 pub use validate::{Invalid, Limits, Where, validate, validate_with};
 
+#[cfg(feature = "debug")]
+use crate::Width;
 use crate::isa::{Ld64, Lds64, Push32, Sts64};
-use crate::{Instr, Op, Region, Width};
+use crate::{Instr, Op, Region};
+
+crate::opaque_debug!(BlockId, Item, Terminator, Block, Cfg);
 
 #[cfg(test)]
 mod tests;
 
 /// Identifies a block within one [`Cfg`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[cfg_attr(feature = "debug", derive(Debug))]
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct BlockId(u32);
 
 impl BlockId {
@@ -54,7 +59,8 @@ impl BlockId {
 }
 
 /// One step of a block's body.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "debug", derive(Debug))]
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Item {
     /// An instruction with nothing left to resolve.
     Instr(Instr),
@@ -117,7 +123,8 @@ impl From<Instr> for Item {
 }
 
 /// How a block ends. Every block ends in exactly one of these.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "debug", derive(Debug))]
+#[derive(Clone, PartialEq, Eq, Hash)]
 pub enum Terminator {
     /// Continue at another block.
     Jmp(BlockId),
@@ -166,7 +173,8 @@ impl Terminator {
 }
 
 /// A straight-line run of items ending in one terminator.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "debug", derive(Debug))]
+#[derive(Clone, PartialEq, Eq)]
 pub struct Block {
     id: BlockId,
     sp_in: u32,
@@ -251,6 +259,7 @@ impl Cfg {
     }
 }
 
+#[cfg(feature = "debug")]
 impl core::fmt::Debug for Cfg {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         let cells = self.frame.cells();
@@ -289,8 +298,10 @@ impl core::fmt::Debug for Cfg {
 }
 
 /// Indent for everything inside a block in the `Debug` listing.
+#[cfg(feature = "debug")]
 const INDENT: &str = "    ";
 
+#[cfg(feature = "debug")]
 fn write_item(f: &mut core::fmt::Formatter<'_>, item: Item) -> core::fmt::Result {
     match item {
         Item::Instr(instr) => write!(f, "{instr}"),
@@ -305,6 +316,7 @@ fn write_item(f: &mut core::fmt::Formatter<'_>, item: Item) -> core::fmt::Result
     }
 }
 
+#[cfg(feature = "debug")]
 fn write_term(
     f: &mut core::fmt::Formatter<'_>,
     term: &Terminator,
@@ -338,6 +350,7 @@ fn write_term(
 }
 
 /// How a width is spelled in a `.frame` line.
+#[cfg(feature = "debug")]
 const fn width_name(width: Width) -> &'static str {
     match width {
         Width::U8 => "u8",
@@ -347,6 +360,7 @@ const fn width_name(width: Width) -> &'static str {
 }
 
 /// How a region is spelled after `$push .` or `$len .`.
+#[cfg(feature = "debug")]
 const fn region_name(region: Region) -> &'static str {
     match region {
         Region::Input => "input",

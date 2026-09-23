@@ -15,7 +15,8 @@ const ALIGN: u32 = WORD_SIZE as u32;
 ///
 /// Listed in the order they are laid out. The stack is last so that it is the
 /// only thing that can grow into the end of the image.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[cfg_attr(feature = "debug", derive(Debug))]
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Region {
     /// What the host put there before the run, sized by the caller rather than
     /// by the program.
@@ -34,7 +35,8 @@ pub enum Region {
 }
 
 /// Where a region ended up.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[cfg_attr(feature = "debug", derive(Debug))]
+#[derive(Clone, Copy, PartialEq, Eq, Default)]
 pub struct Span {
     base: u32,
     len: u32,
@@ -68,7 +70,8 @@ impl Span {
 }
 
 /// How big each region needs to be.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[cfg_attr(feature = "debug", derive(Debug))]
+#[derive(Clone, Copy, PartialEq, Eq, Default)]
 pub struct Sizes {
     /// Bytes the host will write.
     pub input: u32,
@@ -79,7 +82,8 @@ pub struct Sizes {
 }
 
 /// Where every region of one program's address space lives.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[cfg_attr(feature = "debug", derive(Debug))]
+#[derive(Clone, Copy, PartialEq, Eq, Default)]
 pub struct Layout {
     input: Span,
     scratch: Span,
@@ -146,7 +150,8 @@ fn place(at: &mut u32, len: u32) -> Option<Span> {
 }
 
 /// A program's address space, with its regions in known places.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "debug", derive(Debug))]
+#[derive(Clone, PartialEq, Eq)]
 pub struct Image {
     memory: Vec<u8>,
     layout: Layout,
@@ -201,6 +206,8 @@ impl Image {
         self.memory
     }
 }
+
+crate::opaque_debug!(Region, Span, Sizes, Layout, Image);
 
 #[cfg(test)]
 mod tests {

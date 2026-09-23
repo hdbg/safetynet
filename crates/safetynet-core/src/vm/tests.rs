@@ -446,14 +446,17 @@ fn reserved_instructions_trap() {
     assert_eq!(
         vm.step(Switch.into()),
         Err(Trap::Reserved {
-            mnemonic: Switch::MNEMONIC
+            instr: Switch.into()
         })
     );
+    let host = Host { index: 3 };
     assert_eq!(
-        vm.step(Host { index: 3 }.into()),
-        Err(Trap::Reserved {
-            mnemonic: Host::MNEMONIC
-        })
+        vm.step(host.into()),
+        Err(Trap::Reserved { instr: host.into() })
+    );
+    assert_eq!(
+        Trap::Reserved { instr: host.into() }.to_string(),
+        "`host` is reserved and does nothing yet"
     );
 }
 

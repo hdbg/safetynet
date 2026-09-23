@@ -23,6 +23,7 @@
 //! Arithmetic wraps and never panics; the checks above are the only way an
 //! instruction fails.
 
+#[cfg(feature = "debug")]
 use core::fmt;
 use core::marker::PhantomData;
 
@@ -31,11 +32,15 @@ use crate::{ByteOrder, FrameSize, Instr, WORD_SIZE, Width, Word};
 
 mod run;
 
+crate::opaque_debug!(Flow, Vm<B: ByteOrder>);
+crate::opaque_error!(Trap);
+
 #[cfg(test)]
 mod tests;
 
 /// Where control goes after an instruction.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "debug", derive(Debug))]
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Flow {
     /// Carry on with the instruction that follows.
     Next,
@@ -55,20 +60,27 @@ pub enum Flow {
 /// Distinct from a decode failure, which says an artifact is not a program at
 /// all. Collapsing the two would put "this image is corrupt" and "the guest
 /// divided by zero" on one code path.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, thiserror::Error)]
+#[cfg_attr(feature = "debug", derive(Debug, thiserror::Error))]
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Trap {
     /// A push or `ALLOC` would take `SP` past the end of the address space.
-    #[error("the stack would grow past the end of memory")]
+    #[cfg_attr(
+        feature = "debug",
+        error("the stack would grow past the end of memory")
+    )]
     StackOverflow,
 
     /// A pop, `FREE`, or a frame displacement would reach below the stack's
     /// base. This is the check that replaces an absolutely-indexed locals
     /// array's implicit in-range indexing.
-    #[error("the stack would reach below its base")]
+    #[cfg_attr(feature = "debug", error("the stack would reach below its base"))]
     StackUnderflow,
 
     /// An access fell outside the address space.
-    #[error("a {width}-byte access at {address:#x} is outside memory")]
+    #[cfg_attr(
+        feature = "debug",
+        error("a {width}-byte access at {address:#x} is outside memory")
+    )]
     OutOfBounds {
         /// The address the guest asked for.
         address: Word,
@@ -77,21 +89,27 @@ pub enum Trap {
     },
 
     /// A divisor of zero, signed or unsigned.
-    #[error("division by zero")]
+    #[cfg_attr(feature = "debug", error("division by zero"))]
     DivideByZero,
 
     /// `i64::MIN / -1`, the one signed division whose result is not
     /// representable. Left to wrap, it would quietly produce `i64::MIN`.
-    #[error("the signed division has no representable result")]
+    #[cfg_attr(
+        feature = "debug",
+        error("the signed division has no representable result")
+    )]
     DivideOverflow,
 
     /// An instruction whose opcode is reserved but whose behaviour is not
     /// defined yet. The bytes are spoken for so that numbering stays stable;
     /// running one is still an error.
-    #[error("`{mnemonic}` is reserved and does nothing yet")]
+    #[cfg_attr(
+        feature = "debug",
+        error("`{}` is reserved and does nothing yet", instr.mnemonic())
+    )]
     Reserved {
-        /// Mnemonic of the reserved instruction.
-        mnemonic: &'static str,
+        /// The reserved instruction.
+        instr: Instr,
     },
 
     // The rest are raised by the fetch loop rather than by an instruction: they
@@ -102,7 +120,10 @@ pub enum Trap {
     /// artifact is corrupt" and "the guest divided by zero" are different
     /// claims — but a machine that is already running has nowhere to report the
     /// former except as a trap.
-    #[error("the bytes at {offset:#x} do not begin an instruction")]
+    #[cfg_attr(
+        feature = "debug",
+        error("the bytes at {offset:#x} do not begin an instruction")
+    )]
     BadInstruction {
         /// Offset of the byte the program counter was on.
         offset: usize,
@@ -110,14 +131,20 @@ pub enum Trap {
 
     /// The program counter left the code, most often by running past the last
     /// instruction without meeting a `HALT`.
-    #[error("the program counter left the code at {offset:#x}")]
+    #[cfg_attr(
+        feature = "debug",
+        error("the program counter left the code at {offset:#x}")
+    )]
     CodeOutOfRange {
         /// Offset the program counter reached.
         offset: usize,
     },
 
     /// A branch aimed outside the code.
-    #[error("the branch at {from:#x} aims {delta} bytes outside the code")]
+    #[cfg_attr(
+        feature = "debug",
+        error("the branch at {from:#x} aims {delta} bytes outside the code")
+    )]
     BadJump {
         /// Offset of the branch instruction.
         from: usize,
@@ -126,7 +153,7 @@ pub enum Trap {
     },
 
     /// The fuel budget ran out mid-program.
-    #[error("out of fuel")]
+    #[cfg_attr(feature = "debug", error("out of fuel"))]
     OutOfFuel,
 }
 
@@ -493,6 +520,7 @@ impl<B: ByteOrder> Vm<B> {
 
 /// Deliberately omits the address space: a dump of every byte is never what a
 /// reader of a panic message wants.
+#[cfg(feature = "debug")]
 impl<B: ByteOrder> fmt::Debug for Vm<B> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Vm")

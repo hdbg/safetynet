@@ -12,7 +12,8 @@
 use crate::marshal::TypeLayout;
 
 /// The constant a [`Patch`] resolves.
-#[derive(Debug, Clone, Copy)]
+#[cfg_attr(feature = "debug", derive(Debug))]
+#[derive(Clone, Copy)]
 pub enum Hole {
     /// A field's byte offset, resolved from its aggregate's layout.
     Field {
@@ -38,7 +39,8 @@ pub enum Hole {
 
 /// A hole in the bytecode: where an immediate sits, how wide and in which order,
 /// and the constant that fills it.
-#[derive(Debug, Clone, Copy)]
+#[cfg_attr(feature = "debug", derive(Debug))]
+#[derive(Clone, Copy)]
 pub struct Patch {
     /// Byte offset of the immediate in the code.
     pub at: usize,
@@ -106,6 +108,8 @@ const fn write_immediate<const N: usize>(
     }
     code
 }
+
+crate::opaque_debug!(Hole, Patch);
 
 #[cfg(test)]
 mod tests {
