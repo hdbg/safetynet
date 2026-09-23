@@ -54,6 +54,8 @@ enum Binding {
     Param { offset: u32, ty: Scalar },
     /// A local, in a frame cell.
     Local { cell: CellId, ty: Scalar },
+    /// A `const` or `static` item of the body, folded to the word it rests as.
+    Const { value: u64, ty: Scalar },
 }
 
 /// A byte region located in the frame: where its content starts, absolutely,
@@ -66,6 +68,10 @@ pub(super) struct RegionCells {
 
 /// Why a `for` iterable was refused.
 const FOR_ITERABLE: &str = "a `for` loop must iterate a range `a..b` or a byte region's `.iter()`";
+
+/// Why a const's initializer was refused.
+const CONST_INIT: &str = "a const's initializer must be a literal, an array of literals, or \
+                          `[literal; N]`; the machine cannot evaluate it";
 
 /// Why a method receiver was refused.
 const NOT_A_RECEIVER: &str =
@@ -330,8 +336,57 @@ impl Lowerer {
                 }
                 other => Err(err(other, "this statement is not supported yet")),
             },
+            syn::Stmt::Item(item) => {
+                self.lower_item(item)?;
+                Ok(Flow::Open)
+            }
             other => Err(err(other, "this statement is not supported yet")),
         }
+    }
+
+    /// Lowers an item declared inside the body. Only a constant can be: the
+    /// machine has no globals, so a `static mut` would not keep its value
+    /// between runs the way the reference copy's does.
+    fn lower_item(&mut self, item: &syn::Item) -> syn::Result<()> {
+        match item {
+            syn::Item::Const(item) => self.lower_const(&item.ident, &item.ty, &item.expr),
+            syn::Item::Static(item) => match item.mutability {
+                syn::StaticMutability::None => self.lower_const(&item.ident, &item.ty, &item.expr),
+                _ => Err(err(
+                    &item.mutability,
+                    "the machine has no globals: a `static mut` could not keep its value between runs",
+                )),
+            },
+            other => Err(err(
+                other,
+                "only `const` and `static` items are lowered inside a body",
+            )),
+        }
+    }
+
+    /// Lowers `const NAME: T = init;`, folding a scalar to the word it rests
+    /// as, so every use is an immediate.
+    ///
+    /// The initializer has to be a literal: the macro will not evaluate an
+    /// expression the compiler would, and a value another const names is a
+    /// reference the reference copy would have to have resolved first.
+    fn lower_const(
+        &mut self,
+        name: &syn::Ident,
+        ty: &syn::Type,
+        init: &syn::Expr,
+    ) -> syn::Result<()> {
+        let Some(scalar) = Scalar::held(ty) else {
+            return Err(err(ty, "a const must be a scalar the machine can hold"));
+        };
+        let value = const_scalar(init)?.ok_or_else(|| err(init, CONST_INIT))?;
+        self.bind(
+            name.to_string(),
+            Binding::Const {
+                value: at_rest(value, scalar),
+                ty: scalar,
+            },
+        )
     }
 
     /// Lowers a run of statements, stopping once a path has diverged.
@@ -398,6 +453,7 @@ impl Lowerer {
         match self.lookup(&name.to_string()) {
             Some(Binding::Local { cell, ty }) => Ok((cell, ty)),
             Some(Binding::Param { .. }) => Err(err(name, "a parameter cannot be assigned to")),
+            Some(Binding::Const { .. }) => Err(err(name, "a constant cannot be assigned to")),
             None => Err(err(name, "no such local")),
         }
     }
@@ -1117,7 +1173,7 @@ impl Lowerer {
     /// target's own normalization: masking narrows, shifting re-signs, and a
     /// widening from unsigned or between signed types is already at rest.
     fn lower_cast(&mut self, cast: &syn::ExprCast, depth: u32) -> syn::Result<Scalar> {
-        let target = Scalar::of(&cast.ty)
+        let target = Scalar::held(&cast.ty)
             .ok_or_else(|| err(&cast.ty, "a cast must target a scalar the machine can hold"))?;
         let source = self.lower_expr(&cast.expr, target, depth)?;
         let at_rest =
@@ -1168,6 +1224,10 @@ impl Lowerer {
             Some(Binding::Local { cell, ty }) => {
                 self.load(cell)?;
                 self.normalize_load(ty)?;
+                Ok(ty)
+            }
+            Some(Binding::Const { value, ty }) => {
+                self.push_word(value)?;
                 Ok(ty)
             }
             None => Err(err(name, "no such parameter or local")),
@@ -1306,7 +1366,9 @@ impl Lowerer {
             syn::Expr::Path(path) => {
                 let name = path.path.get_ident()?;
                 Some(match self.lookup(&name.to_string())? {
-                    Binding::Param { ty, .. } | Binding::Local { ty, .. } => ty,
+                    Binding::Param { ty, .. }
+                    | Binding::Local { ty, .. }
+                    | Binding::Const { ty, .. } => ty,
                 })
             }
             syn::Expr::Paren(paren) => self.peek(&paren.expr),
@@ -1329,7 +1391,7 @@ impl Lowerer {
                     _ => None,
                 }
             }
-            syn::Expr::Cast(cast) => Scalar::of(&cast.ty),
+            syn::Expr::Cast(cast) => Scalar::held(&cast.ty),
             syn::Expr::Field(field) => {
                 let (_, path) = field_path(field).ok()?;
                 self.field_types
@@ -1684,6 +1746,49 @@ fn declared_local(local: &syn::Local) -> syn::Result<(String, Scalar, syn::Type)
     let scalar = Scalar::of(&typed.ty)
         .ok_or_else(|| err(&typed.ty, "a local must be a scalar the machine can hold"))?;
     Ok((name, scalar, (*typed.ty).clone()))
+}
+
+/// The word a literal initializer spells, or `None` when the expression is
+/// not one: an integer, `true`/`false`, a byte, or the negation of an
+/// integer. A suffix is not read; the reference copy checks it against the
+/// declared type.
+fn const_scalar(expr: &syn::Expr) -> syn::Result<Option<u64>> {
+    Ok(match expr {
+        syn::Expr::Paren(paren) => const_scalar(&paren.expr)?,
+        syn::Expr::Lit(lit) => match &lit.lit {
+            syn::Lit::Int(int) => Some(int.base10_parse()?),
+            syn::Lit::Bool(boolean) => Some(boolean.value.into()),
+            syn::Lit::Byte(byte) => Some(byte.value().into()),
+            _ => None,
+        },
+        syn::Expr::Unary(syn::ExprUnary {
+            op: syn::UnOp::Neg(_),
+            expr,
+            ..
+        }) => match &**expr {
+            syn::Expr::Lit(syn::ExprLit {
+                lit: syn::Lit::Int(int),
+                ..
+            }) => Some(0u64.wrapping_sub(int.base10_parse()?)),
+            _ => None,
+        },
+        _ => None,
+    })
+}
+
+/// A word in the resting form `normalize` would leave it in at run time:
+/// masked to the width when unsigned, sign-extended from it when signed.
+fn at_rest(value: u64, ty: Scalar) -> u64 {
+    let bits = u32::from(ty.width.bits());
+    if bits == u64::BITS {
+        value
+    } else if ty.signed {
+        let shift = u64::BITS - bits;
+        // Two's-complement sign extension: shift the sign bit up, then back down.
+        ((value << shift) as i64 >> shift) as u64
+    } else {
+        value & (u64::MAX >> (u64::BITS - bits))
+    }
 }
 
 /// The function's return type, or `None` when it returns nothing.
