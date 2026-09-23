@@ -1,10 +1,16 @@
 //! `#[safetynet]` functions run on the VM and agree with the plain Rust they
 //! were written as.
 
-// The fixtures write out `s = s + i` and `i % 3 == 0` on purpose, to exercise
-// plain assignment and remainder — the tidier idioms clippy suggests are either
-// what a separate test already covers or something the subset cannot lower.
-#![allow(clippy::assign_op_pattern, clippy::manual_is_multiple_of)]
+// The fixtures write out `s = s + i`, `i % 3 == 0`, `TABLE[i]` and a counted
+// walk on purpose, to exercise plain assignment, remainder, indexing and
+// its bounds check — the tidier idioms clippy suggests are either what a
+// separate test already covers or something the subset cannot lower.
+#![allow(
+    clippy::assign_op_pattern,
+    clippy::manual_is_multiple_of,
+    clippy::indexing_slicing,
+    clippy::explicit_counter_loop
+)]
 
 use safetynet::safetynet;
 
@@ -737,4 +743,62 @@ fn two_tables_and_their_lengths() {
     let folded: u8 = 0xde ^ 0xad ^ 0xbe ^ 0xef;
     assert_eq!(xor_key(0), folded.wrapping_add(20));
     assert_eq!(xor_key(0xff), (0xff ^ folded).wrapping_add(20));
+}
+
+#[safetynet]
+fn substitute(x: u8) -> u8 {
+    const SBOX: [u8; 16] = [
+        0xc, 0x5, 0x6, 0xb, 0x9, 0x0, 0xa, 0xd, 0x3, 0xe, 0xf, 0x8, 0x4, 0x7, 0x1, 0x2,
+    ];
+    (SBOX[(x >> 4) as usize] << 4) | SBOX[(x & 0xf) as usize]
+}
+
+#[safetynet]
+fn pick_weight(i: u32) -> u64 {
+    const WEIGHTS: [u64; 3] = [100, 200, 300];
+    WEIGHTS[i as usize]
+}
+
+#[safetynet]
+fn dot_with_constants(m: Msg) -> u32 {
+    const COEFF: [u32; 4] = [1, 10, 100, 1000];
+    let mut s: u32 = 0;
+    let mut i: u32 = 0;
+    for b in m.body.iter() {
+        if i < 4 {
+            s += *b as u32 * COEFF[i as usize];
+        }
+        i += 1;
+    }
+    s
+}
+
+#[test]
+fn an_sbox_substitutes_each_nibble() {
+    assert_eq!(substitute(0x00), 0xcc);
+    assert_eq!(substitute(0x1f), 0x52);
+    assert_eq!(substitute(0xff), 0x22);
+}
+
+#[test]
+fn a_runtime_index_reads_the_table() {
+    assert_eq!(pick_weight(0), 100);
+    assert_eq!(pick_weight(2), 300);
+}
+
+#[test]
+#[should_panic(expected = "safetynet")]
+fn an_index_past_the_table_aborts_the_run() {
+    let _ = pick_weight(3);
+}
+
+#[test]
+fn a_walk_and_a_table_combine() {
+    let m = Msg {
+        kind: 0,
+        body: Bytes::from(&[3u8, 2, 1, 4, 9][..]),
+        name: String::new(),
+        tag: 0,
+    };
+    assert_eq!(dot_with_constants(m), 3 + 20 + 100 + 4000);
 }

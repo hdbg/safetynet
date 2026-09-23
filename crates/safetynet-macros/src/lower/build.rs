@@ -1153,8 +1153,102 @@ impl Lowerer {
             syn::Expr::MethodCall(call) => self.lower_method(call, depth),
             syn::Expr::Cast(cast) => self.lower_cast(cast, depth),
             syn::Expr::Field(field) => self.lower_field_known(field),
+            syn::Expr::Index(index) => self.lower_index(index, depth),
             other => Err(err(other, "this expression is not supported yet")),
         }
+    }
+
+    /// Lowers `TABLE[i]`: an index known at expansion folds to the element's
+    /// address; one computed at run time is checked against the table's
+    /// length first and aborts past it, where the reference copy panics.
+    fn lower_index(&mut self, index: &syn::ExprIndex, depth: u32) -> syn::Result<Scalar> {
+        let table = match self.classify(&index.expr)? {
+            Receiver::Table(table) => table,
+            Receiver::Place(_) => {
+                return Err(err(
+                    &index.expr,
+                    "indexing a byte region is not supported yet: walk it with `.iter()`",
+                ));
+            }
+            Receiver::Walk(_) => return Err(err(&index.expr, "a walk cannot be indexed")),
+        };
+        let elem = table.elem;
+
+        if let Some(at) = self.const_index(&index.index)? {
+            if at >= u64::from(table.len) {
+                return Err(err(
+                    &index.index,
+                    &format!(
+                        "index {at} is out of bounds for a constant of {} elements",
+                        table.len
+                    ),
+                ));
+            }
+            let off = u64::from(table.off) + at * u64::from(elem.size());
+            self.push_base(Region::Rodata)?;
+            if off != 0 {
+                self.push_word(off)?;
+                self.push_instr(Add)?;
+            }
+            self.push_instr(load(elem.width))?;
+            self.normalize_load(elem)?;
+            return Ok(elem);
+        }
+
+        // Rust indexes with a `usize`, which the machine holds as a word; a
+        // narrower index is a type error in the reference copy too.
+        let ty = self.lower_expr(&index.index, Scalar::U64, depth)?;
+        if ty != Scalar::U64 {
+            return Err(err(
+                &index.index,
+                "an index must be a `usize`: cast it with `as usize`",
+            ));
+        }
+        // The index is needed twice, for the check and the address, and there
+        // is no `dup`: a cell holds it.
+        let at = self.cell(Width::U64, &index.index)?;
+        self.store(at)?;
+        self.load(at)?;
+        self.push_word(u64::from(table.len))?;
+        self.push_instr(CmpLt)?;
+        let ok = self.builder.block(depth);
+        let abort = self.builder.block(depth);
+        self.seal(
+            self.cur,
+            Terminator::Br {
+                then: ok,
+                els: abort,
+            },
+        )?;
+        self.seal(abort, Terminator::Abort)?;
+
+        self.cur = ok;
+        self.push_table(&table)?;
+        self.load(at)?;
+        self.stride(elem)?;
+        self.push_instr(Add)?;
+        self.push_instr(load(elem.width))?;
+        self.normalize_load(elem)?;
+        Ok(elem)
+    }
+
+    /// The index an expression fixes at expansion: a literal, or a const of
+    /// the body.
+    fn const_index(&self, expr: &syn::Expr) -> syn::Result<Option<u64>> {
+        Ok(match unparen(expr) {
+            syn::Expr::Lit(syn::ExprLit {
+                lit: syn::Lit::Int(int),
+                ..
+            }) => Some(int.base10_parse()?),
+            syn::Expr::Path(path) => match path.path.get_ident() {
+                Some(name) => match self.lookup(&name.to_string()) {
+                    Some(Binding::Const { value, .. }) => Some(value),
+                    _ => None,
+                },
+                None => None,
+            },
+            _ => None,
+        })
     }
 
     /// Records the type a field's first use named, refusing a second name
@@ -1477,6 +1571,10 @@ impl Lowerer {
                 }
             }
             syn::Expr::Cast(cast) => Scalar::held(&cast.ty),
+            syn::Expr::Index(index) => match self.classify(&index.expr).ok()? {
+                Receiver::Table(table) => Some(table.elem),
+                Receiver::Place(_) | Receiver::Walk(_) => None,
+            },
             syn::Expr::Field(field) => {
                 let (_, path) = field_path(field).ok()?;
                 self.field_types
@@ -1687,6 +1785,7 @@ fn is_value_expr(expr: &syn::Expr) -> bool {
             | syn::Expr::Field(_)
             | syn::Expr::MethodCall(_)
             | syn::Expr::Cast(_)
+            | syn::Expr::Index(_)
             | syn::Expr::Block(_)
     )
 }
