@@ -699,6 +699,15 @@ life-before-main registration, which would place layout data in a named linker
 section in the running binary — the opposite of the goal.
 
 **Verify, do not trust.** DCE is an optimization, not a guarantee, and this is a
+The `debug` feature is the switch for every human-readable form: error
+messages, `Debug` output, the IR listing and the mnemonics. Off, which is the
+default, each of those writes nothing and a wrapper that fails panics with one
+fixed word, so no message text exists to strip. The feature is never enabled
+from a dependency edge: a proc-macro selected as a workspace member has its
+dependencies' features unified with the runtime's, so the proc-macro crate
+has a `debug` feature of its own, on for its tests and forwarded by the
+façade's, and off everywhere else.
+
 security property (Review §R4). On the stripped release binary, CI must assert:
 `strings | grep` finds no field names; `nm`/`cargo bloat` show no
 `assemble`/`lower_block`/`backpatch` symbols. The memory image ships by

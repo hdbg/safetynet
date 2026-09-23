@@ -132,6 +132,23 @@ crates/
   safetynet-demo     a sample cipher lowered from Rust with #[safetynet]
 docs/spec.md         the full specification and design review
 ```
+## The `debug` feature
+
+Off by default. Without it the runtime carries no human-readable text at all:
+error types display nothing, `Debug` writes nothing, there is no IR listing and
+no instruction mnemonic, and a failing wrapper panics with the single word
+`safetynet`. Turn it on to see why something failed:
+
+```toml
+[dependencies]
+safetynet = { version = "0.1", features = ["debug"] }
+```
+
+The feature also covers the compiler: `SN_DUMP_IR=1` prints a listing and an
+assembler error names its reason only with `debug` on. Errors about the Rust
+subset itself are always spelled out. CI builds the demo without the feature
+and fails if any diagnostic text turns up in the binary.
+
 **Not supported**
 
 - Recursion
