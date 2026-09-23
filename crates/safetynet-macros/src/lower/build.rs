@@ -1165,20 +1165,24 @@ impl Lowerer {
         }
     }
 
+    /// Lowers `x[i]` on a constant table or a byte region.
+    fn lower_index(&mut self, index: &syn::ExprIndex, depth: u32) -> syn::Result<Scalar> {
+        match self.classify(&index.expr)? {
+            Receiver::Table(table) => self.lower_table_index(&table, index, depth),
+            Receiver::Place(place) => self.lower_region_index(&place, index, depth),
+            Receiver::Walk(_) => Err(err(&index.expr, "a walk cannot be indexed")),
+        }
+    }
+
     /// Lowers `TABLE[i]`: an index known at expansion folds to the element's
     /// address; one computed at run time is checked against the table's
     /// length first and aborts past it, where the reference copy panics.
-    fn lower_index(&mut self, index: &syn::ExprIndex, depth: u32) -> syn::Result<Scalar> {
-        let table = match self.classify(&index.expr)? {
-            Receiver::Table(table) => table,
-            Receiver::Place(_) => {
-                return Err(err(
-                    &index.expr,
-                    "indexing a byte region is not supported yet: walk it with `.iter()`",
-                ));
-            }
-            Receiver::Walk(_) => return Err(err(&index.expr, "a walk cannot be indexed")),
-        };
+    fn lower_table_index(
+        &mut self,
+        table: &Table,
+        index: &syn::ExprIndex,
+        depth: u32,
+    ) -> syn::Result<Scalar> {
         let elem = table.elem;
 
         if let Some(at) = self.const_index(&index.index)? {
@@ -1202,21 +1206,60 @@ impl Lowerer {
             return Ok(elem);
         }
 
+        let len = table.len;
+        let at = self.checked_index(&index.index, depth, |this| this.push_word(u64::from(len)))?;
+        self.push_table(table)?;
+        self.load(at)?;
+        self.stride(elem)?;
+        self.push_instr(Add)?;
+        self.push_instr(load(elem.width))?;
+        self.normalize_load(elem)?;
+        Ok(elem)
+    }
+
+    /// Lowers `region[i]`: the header is read and clamped as for a walk, then
+    /// the index is checked against that length. Nothing folds here, since
+    /// the length is the host's: a literal past the end is a panic in the
+    /// reference copy and an abort in the machine.
+    fn lower_region_index(
+        &mut self,
+        place: &Place,
+        index: &syn::ExprIndex,
+        depth: u32,
+    ) -> syn::Result<Scalar> {
+        let region = self.load_region(place, depth, &index.expr)?;
+        let at = self.checked_index(&index.index, depth, |this| this.load(region.len))?;
+        self.load(region.base)?;
+        self.load(at)?;
+        self.push_instr(Add)?;
+        self.push_instr(Ld8)?;
+        Ok(Scalar::U8)
+    }
+
+    /// Lowers a run-time index into a cell and guards it: `at < len`, with
+    /// `len` pushed by `push_len`, or the block aborts. Returns the cell, with
+    /// the current block the one where the index is known to be in bounds.
+    fn checked_index(
+        &mut self,
+        index: &syn::Expr,
+        depth: u32,
+        push_len: impl FnOnce(&mut Self) -> syn::Result<()>,
+    ) -> syn::Result<CellId> {
         // Rust indexes with a `usize`, which the machine holds as a word; a
         // narrower index is a type error in the reference copy too.
-        let ty = self.lower_expr(&index.index, Scalar::U64, depth)?;
+        let ty = self.lower_expr(index, Scalar::U64, depth)?;
         if ty != Scalar::U64 {
             return Err(err(
-                &index.index,
+                index,
                 "an index must be a `usize`: cast it with `as usize`",
             ));
         }
         // The index is needed twice, for the check and the address, and there
         // is no `dup`: a cell holds it.
-        let at = self.cell(Width::U64, &index.index)?;
+        let at = self.cell(Width::U64, index)?;
         self.store(at)?;
         self.load(at)?;
-        self.push_word(u64::from(table.len))?;
+        push_len(self)?;
         self.push_instr(CmpLt)?;
         let ok = self.builder.block(depth);
         let abort = self.builder.block(depth);
@@ -1228,15 +1271,8 @@ impl Lowerer {
             },
         )?;
         self.seal(abort, Terminator::Abort)?;
-
         self.cur = ok;
-        self.push_table(&table)?;
-        self.load(at)?;
-        self.stride(elem)?;
-        self.push_instr(Add)?;
-        self.push_instr(load(elem.width))?;
-        self.normalize_load(elem)?;
-        Ok(elem)
+        Ok(at)
     }
 
     /// The index an expression fixes at expansion: a literal, or a const of
@@ -1580,7 +1616,8 @@ impl Lowerer {
             syn::Expr::Cast(cast) => Scalar::held(&cast.ty),
             syn::Expr::Index(index) => match self.classify(&index.expr).ok()? {
                 Receiver::Table(table) => Some(table.elem),
-                Receiver::Place(_) | Receiver::Walk(_) => None,
+                Receiver::Place(_) => Some(Scalar::U8),
+                Receiver::Walk(_) => None,
             },
             syn::Expr::Field(field) => {
                 let (_, path) = field_path(field).ok()?;

@@ -802,3 +802,55 @@ fn a_walk_and_a_table_combine() {
     };
     assert_eq!(dot_with_constants(m), 3 + 20 + 100 + 4000);
 }
+
+#[safetynet]
+fn byte_at_kind(m: Msg) -> u8 {
+    m.body[m.kind.typed::<u8>() as usize]
+}
+
+#[safetynet]
+fn last_body_byte(m: Msg) -> u8 {
+    m.body[m.body.len() - 1]
+}
+
+#[safetynet]
+fn first_name_byte(m: Msg) -> u8 {
+    m.name.as_bytes()[0]
+}
+
+#[safetynet]
+fn first(v: Vec<u8>) -> u8 {
+    v[0]
+}
+
+#[test]
+fn a_byte_region_is_indexed_from_the_input() {
+    let m = Msg {
+        kind: 2,
+        body: Bytes::from(&[10u8, 20, 30, 40][..]),
+        name: String::from("xy"),
+        tag: 0,
+    };
+    assert_eq!(byte_at_kind(m.clone()), 30);
+    assert_eq!(last_body_byte(m.clone()), 40);
+    assert_eq!(first_name_byte(m), b'x');
+    assert_eq!(first(vec![9, 8]), 9);
+}
+
+#[test]
+#[should_panic(expected = "safetynet")]
+fn an_index_past_the_region_aborts_the_run() {
+    let m = Msg {
+        kind: 4,
+        body: Bytes::from(&[10u8, 20, 30, 40][..]),
+        name: String::new(),
+        tag: 0,
+    };
+    let _ = byte_at_kind(m);
+}
+
+#[test]
+#[should_panic(expected = "safetynet")]
+fn an_empty_region_has_no_first_byte() {
+    let _ = first(Vec::new());
+}
