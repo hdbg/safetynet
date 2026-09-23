@@ -732,7 +732,10 @@ fn an_index_must_be_a_word_into_a_table() {
         refusal("fn f(i: u32) -> u32 { const T: [u32; 2] = [1, 2]; T[i] }")
             .contains("cast it with `as usize`")
     );
-    assert!(refusal("fn f(p: Msg) -> u8 { p.body[0] }").contains("walk it with `.iter()`"));
+    assert!(
+        refusal("fn f(p: Msg) -> u8 { p.body[p.kind.typed::<u32>()] }")
+            .contains("cast it with `as usize`")
+    );
     assert!(
         refusal("fn f() -> u32 { const T: [u32; 2] = [1, 2]; T.iter()[0] }")
             .contains("cannot be indexed")
@@ -753,4 +756,74 @@ fn a_const_the_macro_cannot_see_is_refused_with_where_to_put_it() {
     assert!(refusal("fn f(x: u64) -> u64 { x * consts::SEED }").contains("outside the function"));
     assert!(refusal("fn f(x: u64) -> u64 { x * u64::MAX }").contains("outside the function"));
     assert!(refusal("fn f(x: u64) -> u64 { x * seed }").contains("no such parameter or local"));
+}
+
+#[test]
+fn a_byte_region_is_indexed_behind_its_checked_length() {
+    let cfg = graph("fn f(p: Msg) -> u8 { p.body[1] }");
+    assert_eq!(
+        format!("{cfg:?}"),
+        "\
+.frame { c0: u64, c1: u32, c2: u64 }
+b0:
+    $push .input
+    $field #0
+    add
+    $loadfield #0
+    $push .input
+    add
+    $store c0
+    $push .input
+    $field #1
+    add
+    $loadfield #1
+    $store c1
+    $load c0
+    $load c1
+    add
+    $push .input
+    $len .input
+    add
+    le
+    jnz b2
+b1:
+    push8 0
+    $store c1
+    jmp b2
+b2:
+    push8 1
+    $store c2
+    $load c2
+    $load c1
+    lt
+    jz b4
+b3:
+    $load c0
+    $load c2
+    add
+    ld8
+    halt
+b4:
+    abort
+",
+        "the header is clamped first, then the index is checked against it"
+    );
+    assert_resolves(&cfg);
+}
+
+#[test]
+fn every_spelling_of_a_region_index_resolves() {
+    assert_resolves(&graph("fn f(p: Msg) -> u8 { p.body[p.body.len() - 1] }"));
+    assert_resolves(&graph("fn f(p: Msg) -> u8 { p.name.as_bytes()[0] }"));
+    assert_resolves(&graph("fn f(v: Vec<u8>) -> u8 { v[0] }"));
+    assert_resolves(&graph("fn f(s: String) -> u8 { s.as_bytes()[2] }"));
+    assert_resolves(&graph(
+        "fn f(p: Msg) -> u8 { p.body[p.kind.typed::<u8>() as usize] + p.header.body[0] }",
+    ));
+    assert_resolves(&graph(
+        "fn f(p: Msg) -> bool { p.body.len() > 0 && p.body[0] == 7 }",
+    ));
+    assert_resolves(&graph(
+        "fn f(p: Msg) -> u32 { let mut s: u32 = 0; for i in 0..4 { s += p.body[i as usize] as u32; } s }",
+    ));
 }
