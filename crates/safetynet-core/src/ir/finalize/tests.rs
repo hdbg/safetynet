@@ -380,6 +380,7 @@ fn a_region_base_comes_from_the_layout() {
     let pushed = |input| {
         let layout = Layout::new(Sizes {
             input,
+            rodata: 0,
             scratch: 8,
             stack: 64,
         })
@@ -407,6 +408,7 @@ fn a_region_base_comes_from_the_layout() {
 fn the_host_and_the_program_agree_without_a_shared_constant() {
     let layout = Layout::new(Sizes {
         input: 4,
+        rodata: 0,
         scratch: 13,
         stack: 64,
     })
@@ -579,6 +581,7 @@ fn one_artifact_lays_out_against_many_images() {
     let base = |input| {
         let layout = Layout::new(Sizes {
             input,
+            rodata: 0,
             scratch: 8,
             stack: 64,
         })
