@@ -45,8 +45,6 @@ crate::opaque_debug!(
 );
 crate::opaque_error!(NotFinal);
 
-// `thiserror` writes this conversion with the feature on.
-#[cfg(not(feature = "debug"))]
 impl From<Invalid> for NotFinal {
     fn from(error: Invalid) -> Self {
         Self::Invalid(error)
@@ -771,7 +769,7 @@ pub enum NotFinal {
     /// The graph does not hold up. Every displacement below rests on this, so
     /// finalization refuses to guess.
     #[cfg_attr(feature = "debug", error("the graph is not valid: {0}"))]
-    Invalid(#[cfg_attr(feature = "debug", from)] Invalid),
+    Invalid(Invalid),
 
     /// Something the instruction set does not lower yet.
     #[cfg_attr(

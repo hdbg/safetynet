@@ -36,15 +36,12 @@ use crate::{ByteOrder, Instr};
 crate::opaque_debug!(Immediate, Packed<B: ByteOrder>);
 crate::opaque_error!(EncodeError, DecodeError);
 
-// `thiserror` writes these conversions with the feature on.
-#[cfg(not(feature = "debug"))]
 impl From<WireError> for EncodeError {
     fn from(error: WireError) -> Self {
         Self(error)
     }
 }
 
-#[cfg(not(feature = "debug"))]
 impl From<WireError> for DecodeError {
     fn from(error: WireError) -> Self {
         Self(error)
@@ -377,13 +374,13 @@ pub trait Decoder {
 #[cfg_attr(feature = "debug", derive(Debug, thiserror::Error))]
 #[cfg_attr(feature = "debug", error("could not encode an instruction: {0}"))]
 #[cfg_attr(not(feature = "debug"), allow(dead_code))]
-pub struct EncodeError(#[cfg_attr(feature = "debug", from)] WireError);
+pub struct EncodeError(WireError);
 
 /// Bytes that do not begin an instruction.
 #[cfg_attr(feature = "debug", derive(Debug, thiserror::Error))]
 #[cfg_attr(feature = "debug", error("not a valid instruction: {0}"))]
 #[cfg_attr(not(feature = "debug"), allow(dead_code))]
-pub struct DecodeError(#[cfg_attr(feature = "debug", from)] WireError);
+pub struct DecodeError(WireError);
 
 /// A [`Writer`] that discards the bytes and keeps the count.
 struct Counter(usize);
