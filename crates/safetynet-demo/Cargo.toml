@@ -10,7 +10,7 @@ readme.workspace = true
 publish = false
 
 [dependencies]
-safetynet = { path = "../safetynet", version = "0.1.1" }
+safetynet = { path = "../safetynet", version = "0.1.2" }
 
 [lints]
 workspace = true
