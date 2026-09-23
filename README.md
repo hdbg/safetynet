@@ -63,7 +63,8 @@ compile time with an error pointing at the offending code.
 - Short-circuiting `&&` and `||`
 - `as` casts between the machine's scalars
 - Byte regions: `Bytes`, `String` and `Vec<u8>` fields (or one as the whole
-  parameter), walked with `for b in p.body.iter()` and measured with `.len()`
+  parameter), walked with `for b in p.body.iter()`, measured with `.len()`,
+  and indexed with `p.body[i]` behind a bounds check
 - `const` and `static` items declared inside the body: a scalar folds into the
   code; a table (`[T; N]`, `&[T]`, `&str`) lives in `.rodata`, walked with
   `.iter()` or `.bytes()`, indexed with a bounds check, measured with `.len()`
@@ -100,6 +101,8 @@ start and how many there are — with the bytes appended after the struct, so
 every field offset is still a compile-time constant and the linker stays
 `const`. The guest walks it the way plain Rust does; `.len()` is a `usize` to
 Rust and a word to the machine, so narrow it with `as` where you need to.
+`p.body[i]` reads one byte behind a check against the region's length, and an
+index past it aborts the run where Rust would panic.
 
 ```rust
 use safetynet::Bytes;
