@@ -107,7 +107,7 @@ fn misaligned_frame_size_fails_to_decode() {
 #[test]
 fn one_of_each_covers_the_table_once() {
     let all = Instr::one_of_each();
-    assert_eq!(all.len(), 43);
+    assert_eq!(all.len(), 44);
 
     let mut mnemonics: Vec<&str> = all.iter().map(|instr| instr.mnemonic()).collect();
     mnemonics.sort_unstable();

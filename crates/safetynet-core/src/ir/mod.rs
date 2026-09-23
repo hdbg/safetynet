@@ -147,6 +147,8 @@ pub enum Terminator {
     },
     /// Stop the machine.
     Halt,
+    /// Stop the machine with a trap: a check the program relies on failed.
+    Abort,
 }
 
 impl Terminator {
@@ -154,7 +156,7 @@ impl Terminator {
     /// branch on.
     pub fn sp_delta(&self) -> i32 {
         match self {
-            Self::Jmp(_) | Self::Halt => crate::isa::Jmp { offset: 0 }.sp_delta(),
+            Self::Jmp(_) | Self::Halt | Self::Abort => crate::isa::Jmp { offset: 0 }.sp_delta(),
             Self::Br { .. } | Self::Switch { .. } => crate::isa::Jz { offset: 0 }.sp_delta(),
         }
     }
@@ -165,7 +167,7 @@ impl Terminator {
             Self::Jmp(next) => ([Some(*next), None], [].as_slice()),
             Self::Br { then, els } => ([Some(*then), Some(*els)], [].as_slice()),
             Self::Switch { arms, default } => ([Some(*default), None], arms.as_slice()),
-            Self::Halt => ([None, None], [].as_slice()),
+            Self::Halt | Self::Abort => ([None, None], [].as_slice()),
         };
 
         edges.into_iter().flatten().chain(table.iter().copied())
@@ -324,6 +326,7 @@ fn write_term(
 ) -> core::fmt::Result {
     match term {
         Terminator::Halt => f.write_str("halt"),
+        Terminator::Abort => f.write_str("abort"),
         Terminator::Jmp(target) => write!(f, "jmp b{}", target.index()),
 
         // A conditional spells the arm that is not reached by falling through.

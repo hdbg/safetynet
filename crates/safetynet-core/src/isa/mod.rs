@@ -231,6 +231,10 @@ define_ops! {
         /// Index into the author-registered host function table.
         index: u8
     } = "host", sp(|_| 0), exec(|_, op| Err(Trap::Reserved { instr: (*op).into() }));
+
+    /// Stops the machine with a trap: the guest's own panic, for a check it
+    /// could not pass. A stack state is not needed, so it costs nothing.
+    Abort = "abort", sp(|_| 0), exec(|_, _| Err(Trap::Aborted));
 }
 
 #[cfg(test)]

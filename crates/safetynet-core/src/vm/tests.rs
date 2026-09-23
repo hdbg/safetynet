@@ -460,6 +460,14 @@ fn reserved_instructions_trap() {
     );
 }
 
+/// An abort is a trap the program asked for, distinct from every one it did not.
+#[test]
+fn an_abort_is_the_guests_own_trap() {
+    let mut vm = machine::<Le>();
+    assert_eq!(vm.step(Abort.into()), Err(Trap::Aborted));
+    assert_eq!(Trap::Aborted.to_string(), "the guest aborted");
+}
+
 // -- the SP model ---------------------------------------------------------
 
 /// Every instruction moves `SP` by exactly what it said it would.
@@ -471,7 +479,7 @@ fn reserved_instructions_trap() {
 fn sp_delta_predicts_execution<B: ByteOrder>() {
     for instr in instructions() {
         // The reserved opcodes never run, so there is nothing to predict.
-        if matches!(instr, Instr::Switch(_) | Instr::Host(_)) {
+        if matches!(instr, Instr::Switch(_) | Instr::Host(_) | Instr::Abort(_)) {
             continue;
         }
 

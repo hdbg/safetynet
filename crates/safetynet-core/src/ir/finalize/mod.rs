@@ -654,6 +654,7 @@ fn emit(cfg: &Cfg, order: &[BlockId]) -> Result<Emitted, NotFinal> {
 
         match block.term() {
             Terminator::Halt => code.push(crate::isa::Halt.into()),
+            Terminator::Abort => code.push(crate::isa::Abort.into()),
             // An edge to the block that follows is not a branch at all.
             Terminator::Jmp(target) if next == Some(*target) => {}
             Terminator::Jmp(target) => branch(Branch::Always, *target, &mut code),
