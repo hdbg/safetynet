@@ -43,12 +43,30 @@ impl Scalar {
         signed: false,
     };
 
+    /// An `isize` as the machine holds it.
+    pub(crate) const I64: Self = Self {
+        width: Width::U64,
+        signed: true,
+    };
+
     /// The scalar a type name denotes, if the machine can hold it.
     ///
     /// There is no two-byte access, so `u16`/`i16` are declined rather than
     /// silently widened.
     pub(crate) fn of(ty: &syn::Type) -> Option<Self> {
         Self::of_name(&ident(ty)?)
+    }
+
+    /// The scalar a type denotes where nothing is marshalled, so a `usize`
+    /// or `isize` is simply the word the machine holds it in. A const's type
+    /// and a cast's target are the two such places; a local or a parameter
+    /// crosses the boundary and keeps the strict rule.
+    pub(crate) fn held(ty: &syn::Type) -> Option<Self> {
+        match ident(ty)?.as_str() {
+            "usize" => Some(Self::U64),
+            "isize" => Some(Self::I64),
+            name => Self::of_name(name),
+        }
     }
 
     /// The scalar a bare name — a type ident, a literal suffix — denotes.

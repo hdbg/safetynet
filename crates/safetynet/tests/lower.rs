@@ -623,3 +623,47 @@ fn a_long_region_is_walked_within_the_fuel() {
     let expected: u32 = body.iter().map(|b| u32::from(*b)).sum();
     assert_eq!(raw_sum(body), expected);
 }
+
+#[safetynet]
+fn lcg_step(state: u64) -> u64 {
+    const MUL: u64 = 0x5851_f42d_4c95_7f2d;
+    const INC: u64 = 0x1405_7b7e_f767_814f;
+    state * MUL + INC
+}
+
+#[safetynet]
+fn biased(x: i32) -> i32 {
+    static BIAS: i32 = -100;
+    x + BIAS
+}
+
+#[safetynet]
+fn count_to_limit() -> u64 {
+    const N: usize = 5;
+    let mut c: u64 = 0;
+    for _ in 0..N {
+        c += 1;
+    }
+    c
+}
+
+#[test]
+fn a_const_in_the_body_is_folded_into_the_code() {
+    assert_eq!(
+        lcg_step(1),
+        1u64.wrapping_mul(0x5851_f42d_4c95_7f2d)
+            .wrapping_add(0x1405_7b7e_f767_814f)
+    );
+    assert_eq!(lcg_step(0), 0x1405_7b7e_f767_814f);
+}
+
+#[test]
+fn a_static_in_the_body_reads_like_a_const() {
+    assert_eq!(biased(5), -95);
+    assert_eq!(biased(100), 0);
+}
+
+#[test]
+fn a_usize_const_bounds_a_range() {
+    assert_eq!(count_to_limit(), 5);
+}

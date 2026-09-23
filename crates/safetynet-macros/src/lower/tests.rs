@@ -401,3 +401,91 @@ fn a_cast_normalizes_to_its_target() {
     assert_resolves(&graph("fn f(x: i32) -> u64 { x as u64 }"));
     assert!(refusal("fn f(x: u32) -> u32 { (x as u16) as u32 }").contains("machine can hold"));
 }
+
+#[test]
+fn a_const_folds_into_an_immediate() {
+    let cfg = graph("fn f(x: u32) -> u32 { const K: u32 = 7; x + K }");
+    assert_eq!(
+        format!("{cfg:?}"),
+        "b0:\n    $push .input\n    ld32\n    push8 7\n    add\n    push32 4294967295\n    and\n    halt\n",
+        "no cell, no load: the const is a push"
+    );
+    assert_resolves(&cfg);
+}
+
+#[test]
+fn a_const_rests_in_its_declared_form() {
+    let cfg = graph("fn f() -> i8 { const M: i8 = -1; M }");
+    assert_eq!(
+        format!("{cfg:?}"),
+        "b0:\n    push64 18446744073709551615\n    halt\n",
+        "a negative narrow const is sign-extended, as a load of it would be"
+    );
+    let cfg = graph("fn f() -> u8 { const B: u8 = b'a'; B }");
+    assert!(format!("{cfg:?}").contains("push8 97"));
+    let cfg = graph("fn f() -> bool { static YES: bool = true; YES }");
+    assert!(format!("{cfg:?}").contains("push8 1"));
+    let cfg = graph("fn f() -> u64 { const BIG: u64 = 0x1_0000_0000; BIG }");
+    assert!(format!("{cfg:?}").contains("push64 4294967296"));
+    assert_resolves(&graph("fn f() -> i64 { const N: i64 = (-5); N * 2 }"));
+}
+
+#[test]
+fn a_usize_const_is_a_word_where_rust_wants_one() {
+    // A `usize` bound types the counter as a word; the reference copy makes
+    // the same choice.
+    let cfg = graph(
+        "fn f() -> u64 { const N: usize = 4; let mut c: u64 = 0; for _ in 0..N { c += 1; } c }",
+    );
+    assert!(format!("{cfg:?}").starts_with(".frame { c0: u64, c1: u64, c2: u64 }\n"));
+    assert_resolves(&cfg);
+    assert_resolves(&graph(
+        "fn f(x: u32) -> u64 { const N: isize = -3; (x as isize + N) as u64 }",
+    ));
+    assert!(refusal("fn f() -> u64 { let n: usize = 4; n as u64 }").contains("machine can hold"));
+}
+
+#[test]
+fn a_const_is_scoped_like_a_local() {
+    assert_resolves(&graph(
+        "fn f(c: bool) -> u32 { const K: u32 = 1; if c { const K: u32 = 2; return K; } K }",
+    ));
+    assert!(refusal("fn f(c: bool) -> u32 { if c { const K: u32 = 2; } K }").contains("no such"));
+}
+
+#[test]
+fn a_const_is_not_a_place() {
+    assert!(
+        refusal("fn f() -> u32 { const K: u32 = 1; K = 2; K }")
+            .contains("constant cannot be assigned")
+    );
+    assert!(
+        refusal("fn f() -> u32 { const K: u32 = 1; K += 2; K }")
+            .contains("constant cannot be assigned")
+    );
+}
+
+#[test]
+fn a_const_needs_a_literal_initializer() {
+    assert!(refusal("fn f() -> u32 { const K: u32 = 1 + 1; K }").contains("cannot evaluate"));
+    assert!(
+        refusal("fn f() -> u32 { const A: u32 = 1; const B: u32 = A; B }")
+            .contains("cannot evaluate")
+    );
+    assert!(refusal("fn f() -> u32 { const K: u32 = g(); K }").contains("cannot evaluate"));
+    assert!(refusal("fn f() -> u32 { const K: u32 = -(1); K }").contains("cannot evaluate"));
+    assert!(refusal("fn f() -> u32 { const K: u32 = u32::MAX; K }").contains("cannot evaluate"));
+}
+
+#[test]
+fn a_const_of_an_unheld_type_is_refused() {
+    assert!(refusal("fn f() -> u32 { const K: u16 = 1; K as u32 }").contains("machine can hold"));
+    assert!(refusal("fn f() -> u32 { const K: f32 = 1.0; 0 }").contains("machine can hold"));
+}
+
+#[test]
+fn a_static_mut_and_other_items_are_refused() {
+    assert!(refusal("fn f() -> u32 { static mut K: u32 = 1; 0 }").contains("no globals"));
+    assert!(refusal("fn f() -> u32 { struct S; 0 }").contains("only `const` and `static`"));
+    assert!(refusal("fn f() -> u32 { fn g() {} 0 }").contains("only `const` and `static`"));
+}
