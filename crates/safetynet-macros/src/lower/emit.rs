@@ -42,7 +42,8 @@ pub(crate) fn expand(attr: TokenStream, item: TokenStream) -> syn::Result<TokenS
     } = build::lower(&func)?;
 
     // A debugging window on the compiler: `SN_DUMP_IR=1` prints the graph each
-    // function lowered to.
+    // function lowered to. The listing is a `debug` form, so it is empty
+    // without the feature.
     if std::env::var_os("SN_DUMP_IR").is_some() {
         eprintln!("// {}\n{cfg:?}", func.sig.ident);
     }
@@ -84,9 +85,13 @@ pub(crate) fn expand(attr: TokenStream, item: TokenStream) -> syn::Result<TokenS
             #marshal
             let mut __sn_input = __sn_fixed.to_vec();
             __sn_input.extend_from_slice(__sn_tail.as_slice());
+            // Every failure goes through one runtime function, which knows
+            // whether the build may say why.
             let __sn_input_len = match u32::try_from(__sn_input.len()) {
                 ::core::result::Result::Ok(__sn_len) => __sn_len,
-                ::core::result::Result::Err(_) => ::core::panic!("safetynet: the input is too large"),
+                ::core::result::Result::Err(_) => ::safetynet::__private::fail(
+                    ::safetynet::__private::Failure::InputTooLarge,
+                ),
             };
             let __sn_layout = match ::safetynet::Layout::new(::safetynet::image::Sizes {
                 input: __sn_input_len,
@@ -94,27 +99,33 @@ pub(crate) fn expand(attr: TokenStream, item: TokenStream) -> syn::Result<TokenS
                 stack: #stack,
             }) {
                 ::core::option::Option::Some(__sn_layout) => __sn_layout,
-                ::core::option::Option::None => ::core::panic!("safetynet: the image does not fit"),
+                ::core::option::Option::None => ::safetynet::__private::fail(
+                    ::safetynet::__private::Failure::ImageDoesNotFit,
+                ),
             };
             let mut __sn_image = ::safetynet::Image::new(__sn_layout);
             if __sn_image.write(::safetynet::Region::Input, &__sn_input).is_none() {
-                ::core::panic!("safetynet: the input does not fit");
+                ::safetynet::__private::fail(::safetynet::__private::Failure::InputDoesNotFit);
             }
             let __sn_program = match #program_fn().finalize(&__sn_layout) {
                 ::core::result::Result::Ok(__sn_program) => __sn_program,
-                ::core::result::Result::Err(__sn_error) => {
-                    ::core::panic!("safetynet: {__sn_error}")
-                }
+                ::core::result::Result::Err(__sn_error) => ::safetynet::__private::fail(
+                    ::safetynet::__private::Failure::NotFinal(__sn_error),
+                ),
             };
             let mut __sn_vm = match ::safetynet::Vm::<::safetynet::Le>::new(__sn_image)
                 .run(&__sn_program, #fuel)
             {
                 ::core::result::Result::Ok(__sn_vm) => __sn_vm,
-                ::core::result::Result::Err(__sn_trap) => ::core::panic!("safetynet: {__sn_trap}"),
+                ::core::result::Result::Err(__sn_trap) => ::safetynet::__private::fail(
+                    ::safetynet::__private::Failure::Trap(__sn_trap),
+                ),
             };
             let __sn_result = match __sn_vm.pop() {
                 ::core::result::Result::Ok(__sn_word) => __sn_word,
-                ::core::result::Result::Err(__sn_trap) => ::core::panic!("safetynet: {__sn_trap}"),
+                ::core::result::Result::Err(__sn_trap) => ::safetynet::__private::fail(
+                    ::safetynet::__private::Failure::Trap(__sn_trap),
+                ),
             };
             <#ret as ::safetynet::VmValue>::from_word(__sn_result)
         }
