@@ -171,7 +171,9 @@ security argument.
   the stack; multi-byte accesses use the build's byte order `B`, `LD8`/`ST8` are
   order-independent
 - Control: `JMP`, `JZ`, `JNZ` (relative offsets), `SWITCH` (jump table)
-- `HOST k` (host escape, §7.4), `HALT`
+- `HOST k` (host escape, §7.4), `HALT`, `ABORT` (stop with `Trap::Aborted`:
+  the guest's own panic, emitted where a check the reference copy would panic
+  on does not hold — a table index past its end)
 
 `LEA` is specified but not yet implemented (§5): it is the only way to take the
 address of a frame local, which arrays, slices and `&local` all need. It will be
@@ -339,7 +341,9 @@ byte offset and a width — never a slot index:
 ```rust
 enum Ty {
     Scalar    { cell: Cell },                     // one cell, width 1/4/8
+    Const     { value: u64, ty: Scalar },         // a body const, folded to its resting word
     Region    { base: Cell, len: Cell },          // absolute address + checked length
+    Table     { off: u32, len: u32, elem: Scalar }, // a body const table, placed in .rodata
     Aggregate { base: FrameOff, layout: LayoutRef },  // laid out in the frame
     AggRef    { cell: Cell, layout: LayoutRef },      // cell holds an absolute address
 }
@@ -351,6 +355,15 @@ located from its header (§6.1). Its two cells are filled once, when the loop or
 `.len()` that names it runs, and the length is the header's claim cut to the
 input's real end. It never needs the address of a frame local, which is why it
 could land before `LEA`.
+
+A `Const` is a `const` or immutable `static` of the body whose type is a
+scalar: it has no cell at all, every use pushes the word. A `Table` is one
+whose type is `[T; N]`, `&[T; N]`, `&[T]` or `&str` with `T` a machine scalar:
+its elements are laid out in `.rodata` at expansion, aligned to `T`, and the
+three numbers that describe it are known at expansion, so a walk over it is
+the region loop with its cells filled from immediates and no clamp, `.len()`
+is an immediate, and `TABLE[i]` is `.rodata + off + i * size_of(T)` behind a
+bounds check (§7.6).
 
 Scalars and regions are cells. An aggregate either lives **directly in the frame**
 — `base` is its frame offset and field access is `base + field.offset`, the same
@@ -415,18 +428,25 @@ later, because every pass written against `Load(cell)` has to be revisited.
 
 ```
 .input     what the host wrote, sized by the caller           (UNTRUSTED)
+.rodata    the program's constants, sized and brought by the program
 .scratch   the program's workspace, sized by the program
 .stack     frame + operand stack, grows upward; SP bound-checked to its end
 ```
 
-Two more are specified and **not yet present**, because neither has anything
-that produces it. `.rodata` (literals, const tables, S-boxes) arrives when a
-program can *have* a constant — which means bytes carried on `Program<B>` and
-placed by the image builder, not a region to reserve now. `.ret` (the marshalled
-return slot) arrives with marshalling; until then a program's result is the word
-on top of the stack when it halts. Reserving either early buys nothing precisely
+`.rodata` holds the tables a body declares (§7.6). The bytes ride on the
+`Artifact` beside the code, already in the build's byte order, and whoever
+runs the artifact writes them into the image the way the host writes `.input`;
+the code reaches them through `$push .rodata`, a relocation like any other
+base. Nothing write-protects the region: there is one address space, and the
+lowerer never emits a store to a computed address, so the only thing that could
+write there is a program built by hand.
+
+One more is specified and **not yet present**: `.ret` (the marshalled return
+slot) arrives with marshalling; until then a program's result is the word on
+top of the stack when it halts. Reserving it early buys nothing precisely
 *because* bases are computed: adding a region later shifts what follows it and
-breaks nothing, since both sides read the layout.
+breaks nothing, since both sides read the layout — which is how `.rodata` went
+in between `.input` and `.scratch` without moving `.input`.
 
 `.input` is a **fixed part followed by a tail**. The fixed part is the
 parameters' `VmLayout` packing, sized at compile time. A variable-length field
@@ -443,9 +463,10 @@ program checks `base + len` against the end of `.input`, pushed through the
 points past the input describes an empty region. That check is what lets the
 walk use a plain `ld8` on a computed address with no further guard.
 
-What separates the three that exist is **who sizes a region and who writes it**.
-`.input` is sized by the caller's types and filled by the host; `.scratch` is
-sized by the program and never touched from outside. Merging them would mean one
+What separates the regions is **who sizes a region and who writes it**.
+`.input` is sized by the caller's types and filled by the host; `.rodata` is
+sized and filled by the program's own artifact; `.scratch` is sized by the
+program and never touched from outside. Merging them would mean one
 number computed from two unrelated sources, and a host needing an offset *within*
 the merged region to know where to put arguments — which is regions again, one
 level down and undocumented.
@@ -550,6 +571,37 @@ args/return marshalled through `.args`/`.ret`. Arbitrary std/library calls are
 rejected. A `HOST k` is a labeled signpost in the disassembly — for I/O, not for
 hiding the crypto you want reversed.
 
+### 7.6 Constants
+`const` and immutable `static` items **declared inside the body** are lowered;
+nothing outside the function is, because the macro sees only the function's
+tokens. A use of a name spelled like a constant that the body does not declare
+is refused with a message that says so, and a path with more than one segment
+(`Self::X`, `m::X`) likewise. Four tiers, all implemented:
+
+1. A scalar (`u8 i8 u32 i32 u64 i64 bool`, plus `usize`/`isize`, which the
+   machine holds as a word since a const is never marshalled) folds to its
+   resting word — masked when unsigned, sign-extended when signed — and every
+   use is an immediate.
+2. A const outside the body is refused, never read.
+3. A table (`[T; N]`, `&[T; N]`, `&[T]`, `&str`, `T` a machine scalar) is
+   placed in `.rodata`; walked with `.iter()`, `.iter().copied()`, `.bytes()`
+   or `.as_bytes().iter()`; measured with `.len()`, an immediate; and indexed.
+   A literal or const index is checked at expansion and folds to an address; a
+   run-time index must be a `usize` (`x as usize`, or a counter of a range
+   bounded by a `usize` const), is checked against the length, and `ABORT`s
+   past it where the reference copy panics.
+4. A `static` is a `const` to the machine. A `static mut` is refused: the
+   machine has no globals, and a fresh image per run could not keep its value
+   between calls, so the two copies would diverge.
+
+An initializer must be a **simple definition**: a literal, `-literal`,
+`[lit, ..]`, `[lit; N]` with a literal `N`, `b"…"`, `"…"`, any of them behind
+`&`. An operator, a call, or a path to another const is refused: the macro
+evaluates nothing, and the reference copy already checks the literal against
+the declared type. The reference copy also owns every type question the
+lowerer does not police — `.iter()` on a `&str`, a `u8` index — so the lowerer
+only has to be consistent with it, never ahead of it.
+
 ---
 
 ## 8. Intermediate representation
@@ -567,6 +619,7 @@ enum Terminator {
     Switch { arms: Vec<BlockId>, default: BlockId },      // default mandatory, §R2
     Ret,
     Halt,
+    Abort,                                                // stop with Trap::Aborted
 }
 ```
 
@@ -620,9 +673,10 @@ The shapes:
   `Br` whose zero arm is next; `jz` is the reverse; `br b1, b2` names both when
   neither follows; `switch [b0, b1] default b2` spells its whole table.
 - **Symbols, never numbers.** `$load c0`/`$store c0` name frame cells, `$push
-  .input` pushes a region base and `$len .input` its size, and `$field #0`/
-  `$tag #0`/`$loadfield #0` show the holes whose types and paths live outside
-  the graph.
+  .input` pushes a region base (`.rodata` for a constant table) and `$len
+  .input` its size, and `$field #0`/`$tag #0`/`$loadfield #0` show the holes
+  whose types and paths live outside the graph. A block that ends in `abort`
+  is the failing arm of a check.
 
 It is an output, not a language: nothing parses it. It is what a failing
 lowerer test prints, what `SN_DUMP_IR=1` dumps (§11), and the before/after diff
@@ -760,7 +814,9 @@ Hardening every dispatch, and unconditionally for now: PC bounds; memory bounds
 the old locals array's implicit in-range indexing; explicit wrapping arithmetic;
 division traps (zero divisor, and `i64::MIN / -1` for the signed pair); and a
 **fuel counter**, one unit per instruction, turning an infinite loop into a clean
-`Trap::OutOfFuel`. `run()` returns `Result<Halt, Trap>`. Making any of this
+`Trap::OutOfFuel`. `ABORT` is the one trap a program raises on purpose,
+`Trap::Aborted`, for a check it lowered from Rust that would have panicked.
+`run()` returns `Result<Halt, Trap>`. Making any of this
 optional is deferred: a knob is easy to add later and impossible to trust if the
 unhardened path was never the tested one (§R8).
 
@@ -1105,9 +1161,10 @@ readable form, `SN_DUMP_IR=1` the dump, and nothing parses it.*
   core's `decode(encode(x)) == x` suite, both orders.)
 - **Three overlapping representations for array-like data** — a `[u8; N]` const
   in `.rodata`, a `Region { base, len }`, and an `Aggregate` — are never unified.
-  The example's `KEY`/`CT` indexing works by implication; specify which
-  representation a const array takes and how indexing lowers for each. (A
-  `Region` now covers input bytes; a const array and indexing remain open.)
+  (Two of the three are now specified: a const array is a `Table` in `.rodata`
+  and indexes as `base + i * size` behind a length check, §7.6; a `Region`
+  covers input bytes and is walk-only. Indexing a region with the same guard
+  against its checked length is the remaining step.)
 - **"Cannot disagree" assumes a coherent build.** Separate compilation with a
   stale artifact could desync a struct's layout between its derive site and a
   `#[safetynet]` use site. Cargo normally prevents this; state the assumption.

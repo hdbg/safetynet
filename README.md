@@ -64,6 +64,9 @@ compile time with an error pointing at the offending code.
 - `as` casts between the machine's scalars
 - Byte regions: `Bytes`, `String` and `Vec<u8>` fields (or one as the whole
   parameter), walked with `for b in p.body.iter()` and measured with `.len()`
+- `const` and `static` items declared inside the body: a scalar folds into the
+  code; a table (`[T; N]`, `&[T]`, `&str`) lives in `.rodata`, walked with
+  `.iter()` or `.bytes()`, indexed with a bounds check, measured with `.len()`
 - `match`
 - Enums, both field-less and data-carrying (WIP)
 - `Result` and `?`, with a single error type (WIP)
@@ -118,6 +121,34 @@ fn checksum(m: Msg) -> u32 {
         s ^= c as u32;
     }
     s + m.body.len() as u32
+}
+```
+
+Constants are declared *inside* the function. The macro sees only the
+function's tokens, so a `const` at module level is invisible to it and a use
+of one is refused with an error that says where to move it. A scalar constant
+becomes an immediate in the code. A table — an array, a slice or a `&str` — is
+laid out in a `.rodata` region of the image, in the same byte order as the
+code; the guest walks it like a byte region, or indexes it, and an index the
+machine cannot prove in bounds is checked at run time and aborts the run where
+Rust would panic. Initializers must be literals: `[1, 2, 3]`, `[0u8; 16]`,
+`b"..."`, `"..."`, or a single number. Anything the compiler would have to
+evaluate — an operator, a call, another const — is refused. A `static` is a
+`const` to the machine; a `static mut` is refused, since the machine has no
+globals to keep one in between runs.
+
+```rust
+#[safetynet]
+fn substitute(x: u8) -> u8 {
+    const SBOX: [u8; 16] = [
+        0xc, 0x5, 0x6, 0xb, 0x9, 0x0, 0xa, 0xd, 0x3, 0xe, 0xf, 0x8, 0x4, 0x7, 0x1, 0x2,
+    ];
+    static ROUNDS: usize = 2;
+    let mut out: u8 = x;
+    for _ in 0..ROUNDS {
+        out = (SBOX[(out >> 4) as usize] << 4) | SBOX[(out & 0xf) as usize];
+    }
+    out
 }
 ```
 
