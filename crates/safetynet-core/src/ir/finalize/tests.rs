@@ -4,7 +4,7 @@ use super::*;
 use crate::encoding::{EncodeError, Encoder, decode, encode, encoded_len};
 use crate::image::{Image, Layout, Region, Sizes};
 use crate::ir::{Frame, Terminator};
-use crate::isa::{Add, Drop, Halt, Ld8, Push8, Push32, Sub, Switch};
+use crate::isa::{Abort, Add, Drop, Halt, Ld8, Push8, Push32, Sub, Switch};
 use crate::samples::{Padded, layout, stack_image};
 use crate::vm::Vm;
 use crate::{Be, Le, Op, Width, Word};
@@ -277,6 +277,29 @@ fn a_switch_has_no_encoding_yet() {
 
     // The opcode exists, it just traps; reserving it keeps the numbering stable.
     assert_eq!(Switch.sp_delta(), -8);
+}
+
+/// An abort ends its block the way a halt does, in one instruction that traps.
+#[test]
+fn an_abort_materializes_and_traps() {
+    let mut builder = Cfg::builder(Frame::new());
+    let entry = builder.block(0);
+    builder.at(entry).expect("open").instr(Push8 { imm: 3 });
+    builder.seal(entry, Terminator::Abort).expect("seals");
+    let cfg = builder.build(entry).expect("builds");
+
+    let program = finalize::<Le>(&cfg, &layout(1024)).expect("finalizes");
+    assert_eq!(
+        disassemble(&program),
+        [Push8 { imm: 3 }.into(), Abort.into()]
+    );
+    assert_eq!(
+        Vm::<Le>::new(stack_image(1024))
+            .run(&program, 100)
+            .err()
+            .map(|error| error.to_string()),
+        Some("the guest aborted".into())
+    );
 }
 
 /// Every displacement rests on the invariant, so it is checked here and not

@@ -61,6 +61,7 @@ pub(crate) fn instructions() -> Vec<Instr> {
         Jnz { offset: i32::MIN }.into(),
         Switch.into(),
         Host { index: 3 }.into(),
+        Abort.into(),
     ]
 }
 

@@ -230,6 +230,7 @@ fn the_conditional_terminators_consume_their_word() {
 
     assert_eq!(Terminator::Jmp(block).sp_delta(), 0);
     assert_eq!(Terminator::Halt.sp_delta(), 0);
+    assert_eq!(Terminator::Abort.sp_delta(), 0);
     assert_eq!(
         Terminator::Br {
             then: block,
@@ -254,6 +255,7 @@ fn a_terminator_names_every_block_it_can_reach() {
     let (a, b, c) = (BlockId(0), BlockId(1), BlockId(2));
 
     assert_eq!(targets(&Terminator::Halt), []);
+    assert_eq!(targets(&Terminator::Abort), []);
     assert_eq!(targets(&Terminator::Jmp(a)), [a]);
     assert_eq!(targets(&Terminator::Br { then: a, els: b }), [a, b]);
     assert_eq!(

@@ -112,6 +112,11 @@ pub enum Trap {
         instr: Instr,
     },
 
+    /// The guest ran an `ABORT`: a check it relies on did not hold, where
+    /// the Rust it was lowered from would have panicked.
+    #[cfg_attr(feature = "debug", error("the guest aborted"))]
+    Aborted,
+
     // The rest are raised by the fetch loop rather than by an instruction: they
     // are what a program counter can do wrong, plus the budget that bounds it.
     /// The bytes at this offset do not begin an instruction.
