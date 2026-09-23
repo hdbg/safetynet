@@ -323,25 +323,43 @@ pub fn assemble_with<E: Encoder + Clone + 'static>(
 /// layout.
 pub struct Artifact<B: ByteOrder> {
     code: Cow<'static, [u8]>,
+    rodata: Cow<'static, [u8]>,
     frame: FrameSize,
     relocs: Vec<Reloc>,
     order: PhantomData<B>,
 }
 
 impl<B: ByteOrder> Artifact<B> {
-    /// Wraps bytecode and its relocation table.
+    /// Wraps bytecode and its relocation table, with no constants.
     pub fn new(code: impl Into<Cow<'static, [u8]>>, frame: FrameSize, relocs: Vec<Reloc>) -> Self {
         Self {
             code: code.into(),
+            rodata: Cow::Borrowed(&[]),
             frame,
             relocs,
             order: PhantomData,
         }
     }
 
+    /// Attaches the constants the code reads from `.rodata`, already in the
+    /// order `B` the code was built in.
+    ///
+    /// They are the program's to bring, not the host's: whoever runs the
+    /// artifact writes them into an image whose `.rodata` is at least this long.
+    #[must_use]
+    pub fn with_rodata(mut self, rodata: impl Into<Cow<'static, [u8]>>) -> Self {
+        self.rodata = rodata.into();
+        self
+    }
+
     /// The bytecode, region bases still at their placeholders.
     pub fn code(&self) -> &[u8] {
         &self.code
+    }
+
+    /// The constants to place in `.rodata` before a run.
+    pub fn rodata(&self) -> &[u8] {
+        &self.rodata
     }
 
     /// Bytes the prologue reserves for locals.
@@ -369,6 +387,7 @@ impl<B: ByteOrder> core::fmt::Debug for Artifact<B> {
         f.debug_struct("Artifact")
             .field("order", &B::NAME)
             .field("code", &self.code.len())
+            .field("rodata", &self.rodata.len())
             .field("frame", &self.frame.bytes())
             .field("relocs", &self.relocs.len())
             .finish()

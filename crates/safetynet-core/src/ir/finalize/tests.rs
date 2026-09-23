@@ -4,7 +4,7 @@ use super::*;
 use crate::encoding::{EncodeError, Encoder, decode, encode, encoded_len};
 use crate::image::{Image, Layout, Region, Sizes};
 use crate::ir::{Frame, Terminator};
-use crate::isa::{Add, Drop, Halt, Push8, Push32, Sub, Switch};
+use crate::isa::{Add, Drop, Halt, Ld8, Push8, Push32, Sub, Switch};
 use crate::samples::{Padded, layout, stack_image};
 use crate::vm::Vm;
 use crate::{Be, Le, Op, Width, Word};
@@ -543,6 +543,47 @@ fn a_relocation_fills_in_the_region_base() {
         Instr::Push32(op) => assert_eq!(op.imm, layout.span(Region::Input).base()),
         other => panic!("expected a base push, got {other:?}"),
     }
+}
+
+/// The constants ride with the artifact and reach the program through the
+/// image, addressed like any other region: the code names `.rodata` and the
+/// layout says where that is.
+#[test]
+fn an_artifact_brings_its_own_constants() {
+    let mut builder = Cfg::builder(Frame::new());
+    let entry = builder.block(0);
+    builder
+        .at(entry)
+        .expect("open")
+        .base(Region::Rodata)
+        .instr(Push8 { imm: 1 })
+        .instr(Add)
+        .instr(Ld8);
+    builder.seal(entry, Terminator::Halt).expect("seals");
+    let cfg = builder.build(entry).expect("builds");
+
+    let bare = assemble::<Le>(&cfg).expect("assembles");
+    assert!(
+        bare.rodata().is_empty(),
+        "nothing until something is attached"
+    );
+
+    let artifact = bare.with_rodata(&[7u8, 42][..]);
+    let layout = Layout::new(Sizes {
+        input: 5,
+        rodata: 2,
+        scratch: 0,
+        stack: 64,
+    })
+    .expect("fits");
+    let mut image = Image::new(layout);
+    image
+        .write(Region::Rodata, artifact.rodata())
+        .expect("the constants fit");
+    let program = artifact.finalize(&layout).expect("finalizes");
+
+    let mut vm = Vm::<Le>::new(image).run(&program, 100).expect("runs");
+    assert_eq!(vm.pop(), Ok(42));
 }
 
 /// The public entry points agree: assembling then finalizing is exactly what the
