@@ -21,6 +21,7 @@ use safetynet_core::isa::{
 };
 use safetynet_core::{Instr, Region, WORD_SIZE, Width, Word};
 
+use super::intrinsics::{self, Handler, Place, Receiver};
 use super::ty::{self, Scalar};
 use crate::backend::FieldRef;
 
@@ -58,16 +59,17 @@ enum Binding {
 /// A byte region located in the frame: where its content starts, absolutely,
 /// and how many bytes it holds once checked against the input.
 #[derive(Clone, Copy)]
-struct RegionCells {
+pub(super) struct RegionCells {
     base: CellId,
-    len: CellId,
+    pub(super) len: CellId,
 }
 
 /// Why a `for` iterable was refused.
 const FOR_ITERABLE: &str = "a `for` loop must iterate a range `a..b` or a byte region's `.iter()`";
 
-/// Why a `.iter()` or `.len()` receiver was refused.
-const NOT_A_REGION: &str = "only the aggregate parameter or one of its fields is a byte region";
+/// Why a method receiver was refused.
+const NOT_A_RECEIVER: &str =
+    "only the aggregate parameter or one of its fields has methods the machine lowers";
 
 /// The blocks a `break` and a `continue` jump to for one enclosing loop.
 struct Loop {
@@ -206,7 +208,7 @@ pub(crate) fn lower(func: &syn::ItemFn) -> syn::Result<Lowered> {
 }
 
 /// The state threaded through lowering a body.
-struct Lowerer {
+pub(super) struct Lowerer {
     builder: Builder,
     /// Name resolution, innermost block last: every syntactic block pushes a
     /// frame and pops it on exit, so a binding lives exactly as long as its
@@ -520,7 +522,10 @@ impl Lowerer {
     fn lower_for(&mut self, for_expr: &syn::ExprForLoop) -> syn::Result<Flow> {
         match &*for_expr.expr {
             syn::Expr::Range(range) => self.lower_for_range(for_expr, range),
-            syn::Expr::MethodCall(call) => self.lower_for_bytes(for_expr, call),
+            syn::Expr::MethodCall(_) => match self.classify(&for_expr.expr)? {
+                Receiver::Walk(place) => self.lower_for_bytes(for_expr, &place),
+                Receiver::Place(_) => Err(err(&for_expr.expr, FOR_ITERABLE)),
+            },
             other => Err(err(other, FOR_ITERABLE)),
         }
     }
@@ -567,14 +572,9 @@ impl Lowerer {
     ///
     /// Each byte is copied into a cell the binding reads, so the body sees a
     /// `u8` where the reference copy sees a `&u8`.
-    fn lower_for_bytes(
-        &mut self,
-        for_expr: &syn::ExprForLoop,
-        call: &syn::ExprMethodCall,
-    ) -> syn::Result<Flow> {
-        let receiver = iter_receiver(call)?;
+    fn lower_for_bytes(&mut self, for_expr: &syn::ExprForLoop, place: &Place) -> syn::Result<Flow> {
         let var = for_var(for_expr)?;
-        let region = self.load_region(receiver, 0)?;
+        let region = self.load_region(place, 0, &for_expr.expr)?;
         let i_cell = self.cell(Width::U32, &for_expr.pat)?;
         let byte_cell = self.cell(Width::U8, &for_expr.pat)?;
 
@@ -664,18 +664,22 @@ impl Lowerer {
     /// really ends before anything is read through it; a header that points
     /// past the input describes an empty region. The blocks this opens sit at
     /// `depth`, so it can run inside an expression.
-    fn load_region(&mut self, receiver: &syn::Expr, depth: u32) -> syn::Result<RegionCells> {
-        let (ty, path) = self.region_path(receiver)?;
-        let base = self.cell(Width::U64, receiver)?;
-        let len = self.cell(Width::U32, receiver)?;
+    pub(super) fn load_region(
+        &mut self,
+        place: &Place,
+        depth: u32,
+        node: impl ToTokens + Copy,
+    ) -> syn::Result<RegionCells> {
+        let base = self.cell(Width::U64, node)?;
+        let len = self.cell(Width::U32, node)?;
 
-        let off_hole = self.region_hole(&ty, &path, "off", receiver)?;
+        let off_hole = self.region_hole(place, "off", node)?;
         self.read_hole(off_hole)?;
         self.push_base(Region::Input)?;
         self.push_instr(Add)?;
         self.store(base)?;
 
-        let len_hole = self.region_hole(&ty, &path, "len", receiver)?;
+        let len_hole = self.region_hole(place, "len", node)?;
         self.read_hole(len_hole)?;
         self.store(len)?;
 
@@ -705,34 +709,105 @@ impl Lowerer {
         Ok(RegionCells { base, len })
     }
 
-    /// The aggregate and the path a region expression names: a field of the
-    /// aggregate parameter, or the parameter itself when it is the region.
-    fn region_path(&self, expr: &syn::Expr) -> syn::Result<(syn::Type, Vec<syn::Ident>)> {
-        let (root, path) = match unparen(expr) {
-            syn::Expr::Field(field) => field_path(field)?,
-            syn::Expr::Path(path) => match path.path.get_ident() {
-                Some(name) => (name.to_string(), Vec::new()),
-                None => return Err(err(path, NOT_A_REGION)),
+    /// What a method receiver is: a place in the aggregate parameter, or a
+    /// walk a method chain started over one.
+    ///
+    /// Each link of a chain is looked up in the method table by the shape of
+    /// what it is called on, so `.as_bytes().iter().copied()` resolves link by
+    /// link and an unknown method is refused at the link that names it.
+    fn classify(&self, expr: &syn::Expr) -> syn::Result<Receiver> {
+        match unparen(expr) {
+            syn::Expr::Field(field) => Ok(Receiver::Place(self.place_of(field)?)),
+            syn::Expr::Path(path) => match (&self.aggregate, path.path.get_ident()) {
+                (Some((name, ty)), Some(root)) if *root == name => Ok(Receiver::Place(Place {
+                    ty: ty.clone(),
+                    path: Vec::new(),
+                })),
+                _ => Err(err(path, NOT_A_RECEIVER)),
             },
-            other => return Err(err(other, NOT_A_REGION)),
-        };
-        match &self.aggregate {
-            Some((name, ty)) if *name == root => Ok((ty.clone(), path)),
-            _ => Err(err(expr, NOT_A_REGION)),
+            syn::Expr::MethodCall(call) => {
+                let receiver = self.classify(&call.receiver)?;
+                match self.method(&receiver, call)?.handler {
+                    Handler::Walk => match receiver {
+                        Receiver::Place(place) => Ok(Receiver::Walk(place)),
+                        Receiver::Walk(_) => Err(internal(call, "a walk started on a walk")),
+                    },
+                    Handler::Same => Ok(receiver),
+                    Handler::Value { .. } => Err(err(
+                        call,
+                        &format!("`.{}()` is a value, which has no methods", call.method),
+                    )),
+                }
+            }
+            other => Err(err(other, NOT_A_RECEIVER)),
         }
     }
 
-    /// A hole for the header field `leaf` of the region at `path`.
-    fn region_hole(
-        &mut self,
-        ty: &syn::Type,
-        path: &[syn::Ident],
-        leaf: &str,
-        node: impl ToTokens,
-    ) -> syn::Result<u32> {
-        let mut path = path.to_vec();
+    /// The table entry for `call` on `receiver`, with the call's shape checked
+    /// against it: no arguments ever, and a turbofish exactly when the entry
+    /// asks for one.
+    fn method(
+        &self,
+        receiver: &Receiver,
+        call: &syn::ExprMethodCall,
+    ) -> syn::Result<&'static intrinsics::Method> {
+        let name = call.method.to_string();
+        let method = intrinsics::find(receiver.kind(), &name).ok_or_else(|| {
+            err(
+                &call.method,
+                &format!(
+                    "`.{name}()` is not lowered on {}",
+                    receiver.kind().describe()
+                ),
+            )
+        })?;
+        if !call.args.is_empty() {
+            return Err(err(&call.args, &format!("`.{name}()` takes no arguments")));
+        }
+        match (method.turbofish, intrinsics::typed_argument(call)) {
+            (true, None) => Err(err(
+                call,
+                &format!("`.{name}()` needs the type: `.{name}::<u32>()`"),
+            )),
+            (false, _) if call.turbofish.is_some() => {
+                Err(err(call, &format!("`.{name}()` takes no type argument")))
+            }
+            _ => Ok(method),
+        }
+    }
+
+    /// Lowers a method call in value position through the table.
+    fn lower_method(&mut self, call: &syn::ExprMethodCall, depth: u32) -> syn::Result<Scalar> {
+        let receiver = self.classify(&call.receiver)?;
+        match self.method(&receiver, call)?.handler {
+            Handler::Value { lower, .. } => lower(self, receiver, call, depth),
+            Handler::Walk | Handler::Same => Err(err(
+                call,
+                &format!(
+                    "`.{}()` starts a walk, which only a `for` can consume",
+                    call.method
+                ),
+            )),
+        }
+    }
+
+    /// The place a field access names, which must be in the aggregate parameter.
+    fn place_of(&self, field: &syn::ExprField) -> syn::Result<Place> {
+        let (root, path) = field_path(field)?;
+        match &self.aggregate {
+            Some((name, ty)) if *name == root => Ok(Place {
+                ty: ty.clone(),
+                path,
+            }),
+            _ => Err(err(field, "only the aggregate parameter has fields")),
+        }
+    }
+
+    /// A hole for the header field `leaf` of the region at `place`.
+    fn region_hole(&mut self, place: &Place, leaf: &str, node: impl ToTokens) -> syn::Result<u32> {
+        let mut path = place.path.clone();
         path.push(syn::Ident::new(leaf, Span::call_site()));
-        self.field_hole(ty.clone(), path, node)
+        self.field_hole(place.ty.clone(), path, node)
     }
 
     /// Adds a frame cell, or refuses when the frame cannot hold it.
@@ -939,60 +1014,45 @@ impl Lowerer {
             syn::Expr::Paren(paren) => self.lower_expr(&paren.expr, expected, depth),
             syn::Expr::Unary(unary) => self.lower_unary(unary, expected, depth),
             syn::Expr::Binary(binary) => self.lower_binary(binary, expected, depth),
-            syn::Expr::MethodCall(call) if call.method == "typed" => self.lower_field_typed(call),
-            syn::Expr::MethodCall(call) if call.method == "len" => self.lower_len(call, depth),
+            syn::Expr::MethodCall(call) => self.lower_method(call, depth),
             syn::Expr::Cast(cast) => self.lower_cast(cast, depth),
             syn::Expr::Field(field) => self.lower_field_known(field),
             other => Err(err(other, "this expression is not supported yet")),
         }
     }
 
-    /// Lowers `p.x.typed::<u64>()`: a field read whose first use names the
-    /// field's type.
-    ///
-    /// The field's own type is not visible here, so its first use names one;
-    /// later uses may go bare. The reference copy calls the real
-    /// `Typed::typed`, which compiles only when the named type is exactly the
-    /// field's own.
-    fn lower_field_typed(&mut self, call: &syn::ExprMethodCall) -> syn::Result<Scalar> {
-        let syn::Expr::Field(field) = unparen(&call.receiver) else {
-            return Err(err(call, "only a field names its type with `.typed()`"));
-        };
-        if !call.args.is_empty() {
-            return Err(err(&call.args, "`.typed()` takes no arguments"));
-        }
-        let ty = typed_argument(call)
-            .ok_or_else(|| err(call, "`.typed()` needs the type: `.typed::<u32>()`"))?;
-        let scalar = Scalar::of(ty)
-            .ok_or_else(|| err(ty, "a field must be typed as a scalar the machine can hold"))?;
-
-        let (_, path) = field_path(field)?;
-        let key = field_key(&path);
-        let spelled = ty.to_token_stream().to_string();
+    /// Records the type a field's first use named, refusing a second name
+    /// that disagrees with it.
+    pub(super) fn name_field_type(
+        &mut self,
+        place: &Place,
+        scalar: Scalar,
+        spelled: String,
+        node: impl ToTokens,
+    ) -> syn::Result<()> {
+        let key = field_key(&place.path);
         match self.field_types.get(&key) {
-            Some((_, prior)) if *prior != spelled => {
-                return Err(err(
-                    call,
-                    &format!("this field is already typed as `{prior}`"),
-                ));
-            }
-            Some(_) => {}
+            Some((_, prior)) if *prior != spelled => Err(err(
+                node,
+                &format!("this field is already typed as `{prior}`"),
+            )),
+            Some(_) => Ok(()),
             None => {
                 self.field_types.insert(key, (scalar, spelled));
+                Ok(())
             }
         }
-        self.lower_field_read(field, scalar)
     }
 
     /// Lowers a bare field read, legal once its type has been named.
     fn lower_field_known(&mut self, field: &syn::ExprField) -> syn::Result<Scalar> {
-        let (root, path) = field_path(field)?;
+        let place = self.place_of(field)?;
         let scalar = self
             .field_types
-            .get(&field_key(&path))
+            .get(&field_key(&place.path))
             .map(|(scalar, _)| *scalar)
             .ok_or_else(|| {
-                let access = format!("{root}.{}", field_key(&path));
+                let access = format!("{}.{}", self.aggregate_name(), field_key(&place.path));
                 err(
                     field,
                     &format!(
@@ -1002,20 +1062,27 @@ impl Lowerer {
                     ),
                 )
             })?;
-        self.lower_field_read(field, scalar)
+        self.read_place(&place, scalar, field)
+    }
+
+    /// The aggregate parameter's name, for a message that spells out a fix.
+    fn aggregate_name(&self) -> &str {
+        self.aggregate
+            .as_ref()
+            .map_or("p", |(name, _)| name.as_str())
     }
 
     /// Reads a field of the aggregate parameter as the asserted `scalar`.
     ///
     /// The offset and load width are resolved from the aggregate's layout at
     /// link time.
-    fn lower_field_read(&mut self, field: &syn::ExprField, scalar: Scalar) -> syn::Result<Scalar> {
-        let (root, path) = field_path(field)?;
-        let ty = match &self.aggregate {
-            Some((name, ty)) if *name == root => ty.clone(),
-            _ => return Err(err(field, "only the aggregate parameter has fields")),
-        };
-        let hole = self.field_hole(ty, path, field)?;
+    pub(super) fn read_place(
+        &mut self,
+        place: &Place,
+        scalar: Scalar,
+        node: impl ToTokens,
+    ) -> syn::Result<Scalar> {
+        let hole = self.field_hole(place.ty.clone(), place.path.clone(), node)?;
         self.read_hole(hole)?;
         self.normalize_load(scalar)?;
         Ok(scalar)
@@ -1042,19 +1109,6 @@ impl Lowerer {
         self.push_instr(Add)?;
         self.body()?.load_field(hole);
         Ok(())
-    }
-
-    /// Lowers `region.len()`: the header's length, checked against the input.
-    ///
-    /// The reference copy sees a `usize`, which the machine holds as a word;
-    /// guest code narrows it with `as`, as Rust would have it.
-    fn lower_len(&mut self, call: &syn::ExprMethodCall, depth: u32) -> syn::Result<Scalar> {
-        if !call.args.is_empty() || call.turbofish.is_some() {
-            return Err(err(call, "`.len()` takes no arguments"));
-        }
-        let region = self.load_region(&call.receiver, depth)?;
-        self.load(region.len)?;
-        Ok(Scalar::U64)
     }
 
     /// Lowers `e as T` between machine scalars.
@@ -1261,10 +1315,20 @@ impl Lowerer {
                 lit: syn::Lit::Bool(_),
                 ..
             }) => Some(Scalar::BOOL),
-            syn::Expr::MethodCall(call) if call.method == "typed" => {
-                Scalar::of(typed_argument(call)?)
+            syn::Expr::MethodCall(call) => {
+                let receiver = self.classify(&call.receiver).ok()?;
+                let method = intrinsics::find(receiver.kind(), &call.method.to_string())?;
+                match method.handler {
+                    Handler::Value {
+                        result: Some(scalar),
+                        ..
+                    } => Some(scalar),
+                    Handler::Value { result: None, .. } => {
+                        Scalar::of(intrinsics::typed_argument(call)?)
+                    }
+                    _ => None,
+                }
             }
-            syn::Expr::MethodCall(call) if call.method == "len" => Some(Scalar::U64),
             syn::Expr::Cast(cast) => Scalar::of(&cast.ty),
             syn::Expr::Field(field) => {
                 let (_, path) = field_path(field).ok()?;
@@ -1370,7 +1434,7 @@ impl Lowerer {
     }
 
     /// Appends a load from a frame cell.
-    fn load(&mut self, cell: CellId) -> syn::Result<()> {
+    pub(super) fn load(&mut self, cell: CellId) -> syn::Result<()> {
         self.body()?.load(cell);
         Ok(())
     }
@@ -1489,51 +1553,12 @@ fn unparen(expr: &syn::Expr) -> &syn::Expr {
     inner
 }
 
-/// The region a `for` walks: `r.iter()`, `r.iter().copied()`, `r.bytes()` or
-/// `r.as_bytes().iter()`, each of which walks the bytes in Rust too.
-fn iter_receiver(call: &syn::ExprMethodCall) -> syn::Result<&syn::Expr> {
-    let plain = |call: &syn::ExprMethodCall| {
-        if call.args.is_empty() && call.turbofish.is_none() {
-            Ok(())
-        } else {
-            Err(err(call, "iterating a byte region takes no arguments"))
-        }
-    };
-    let mut call = call;
-    if call.method == "copied" {
-        plain(call)?;
-        call = match &*call.receiver {
-            syn::Expr::MethodCall(inner) if inner.method == "iter" => inner,
-            other => return Err(err(other, "`.copied()` follows `.iter()` on a byte region")),
-        };
-    }
-    if call.method != "iter" && call.method != "bytes" {
-        return Err(err(call, FOR_ITERABLE));
-    }
-    plain(call)?;
-    Ok(match &*call.receiver {
-        syn::Expr::MethodCall(inner) if inner.method == "as_bytes" && inner.args.is_empty() => {
-            &inner.receiver
-        }
-        other => other,
-    })
-}
-
 /// Picks the signed or unsigned opcode by the operand type.
 fn signed(ty: Scalar, when_signed: Instr, when_unsigned: Instr) -> Instr {
     if ty.signed {
         when_signed
     } else {
         when_unsigned
-    }
-}
-
-/// The `T` of `.typed::<T>()`, when the turbofish names exactly one type.
-fn typed_argument(call: &syn::ExprMethodCall) -> Option<&syn::Type> {
-    let turbofish = call.turbofish.as_ref()?;
-    match turbofish.args.first() {
-        Some(syn::GenericArgument::Type(ty)) if turbofish.args.len() == 1 => Some(ty),
-        _ => None,
     }
 }
 
@@ -1685,12 +1710,12 @@ fn reject_odd_signature(func: &syn::ItemFn) -> syn::Result<()> {
 }
 
 /// A refusal pointed at the offending syntax.
-fn err<T: ToTokens>(node: T, message: &str) -> syn::Error {
+pub(super) fn err<T: ToTokens>(node: T, message: &str) -> syn::Error {
     syn::Error::new_spanned(node, message)
 }
 
 /// A builder failure, which means the lowerer built something impossible.
-fn internal<T: ToTokens>(node: T, error: impl core::fmt::Display) -> syn::Error {
+pub(super) fn internal<T: ToTokens>(node: T, error: impl core::fmt::Display) -> syn::Error {
     syn::Error::new_spanned(node, format!("internal lowering error: {error}"))
 }
 

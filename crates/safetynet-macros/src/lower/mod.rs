@@ -6,6 +6,7 @@
 
 mod build;
 mod emit;
+mod intrinsics;
 mod ty;
 
 #[cfg(test)]
