@@ -82,7 +82,10 @@ pub(crate) fn expand(attr: TokenStream, item: TokenStream) -> syn::Result<TokenS
     // callers actually see.
     let attrs = &func.attrs;
     let vis = &func.vis;
-    let sig = &func.sig;
+    // The wrapper marshals its arguments and never mutates them, so a `mut`
+    // the caller wrote for its own body would be a needless `mut` here. It
+    // stays on the reference copy, which is where a write actually happens.
+    let sig = public_signature(&func.sig);
     let args = param_names(&func)?;
     let fuel = Literal::u64_suffixed(FUEL);
     let (fixed_len, marshal) = input_shape(aggregate.as_ref(), &args, &param_offsets, input_size);
@@ -209,6 +212,20 @@ fn input_shape(
             )*
         },
     )
+}
+
+/// The public wrapper's signature: the original with `mut` stripped from each
+/// parameter, since the wrapper binds them only to marshal them.
+fn public_signature(sig: &syn::Signature) -> syn::Signature {
+    let mut sig = sig.clone();
+    for arg in &mut sig.inputs {
+        if let syn::FnArg::Typed(typed) = arg
+            && let syn::Pat::Ident(pat) = &mut *typed.pat
+        {
+            pat.mutability = None;
+        }
+    }
+    sig
 }
 
 /// The parameter names, to marshal in signature order.

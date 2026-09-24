@@ -17,7 +17,7 @@ use quote::ToTokens;
 use safetynet_core::ir::{BlockId, Builder, CellId, Cfg, Frame, Terminator};
 use safetynet_core::isa::{
     Add, And, BitNot, CmpEq, CmpLe, CmpLt, CmpSLe, CmpSLt, Div, Ld8, Ld32, Ld64, Mul, Or, Push8,
-    Push32, Push64, Rem, SDiv, SRem, Sar, Shl, Shr, Sub, Xor,
+    Push32, Push64, Rem, SDiv, SRem, Sar, Shl, Shr, St8, Sub, Xor,
 };
 use safetynet_core::{Instr, Region, WORD_SIZE, Width, Word};
 
@@ -496,6 +496,9 @@ impl Lowerer {
 
     /// Lowers `x = e`: evaluate `e`, store it into the local `x`.
     fn lower_assign(&mut self, target: &syn::Expr, value: &syn::Expr) -> syn::Result<()> {
+        if let syn::Expr::Index(index) = unparen(target) {
+            return self.lower_indexed_store(index, value);
+        }
         let (cell, ty) = self.assign_target(target)?;
         self.lower_value(value, ty)?;
         self.store(cell)
@@ -504,6 +507,9 @@ impl Lowerer {
     /// Lowers `x op= e`: load `x`, apply `op` with `e`, store it back.
     fn lower_compound(&mut self, binary: &syn::ExprBinary) -> syn::Result<()> {
         let op = compound(&binary.op).ok_or_else(|| err(binary, "not a compound assignment"))?;
+        if let syn::Expr::Index(index) = unparen(&binary.left) {
+            return self.lower_indexed_compound(op, index, &binary.right);
+        }
         let (cell, ty) = self.assign_target(&binary.left)?;
         self.load(cell)?;
         self.normalize_load(ty)?;
@@ -513,6 +519,84 @@ impl Lowerer {
         }
         self.emit_op(op, ty)?;
         self.store(cell)
+    }
+
+    /// Lowers `region[i] = value`: an in-place byte write into a region of the
+    /// input, bounds-checked and aborting past the end where Rust would panic.
+    ///
+    /// The element is a `u8`, which the reference copy enforces; a `String`,
+    /// which has no mutable index, is refused there rather than here.
+    fn lower_indexed_store(
+        &mut self,
+        index: &syn::ExprIndex,
+        value: &syn::Expr,
+    ) -> syn::Result<()> {
+        let (place, at) = self.indexed_target(index)?;
+        let region = self.load_region(&place, 0, &index.expr)?;
+        let at_cell = self.checked_index(at, 0, move |this| this.load(region.len))?;
+        // `store` pops the value then the address, so the address goes down
+        // first: base + i, then the byte, then the store.
+        self.load(region.base)?;
+        self.load(at_cell)?;
+        self.push_instr(Add)?;
+        self.lower_expr(value, Scalar::U8, WORD_SIZE as u32)?;
+        self.push_instr(St8)?;
+        Ok(())
+    }
+
+    /// Lowers `region[i] op= value`: the same write, over the byte already
+    /// there. The address is named once in a cell, since the load and the
+    /// store both need it and there is no `dup`.
+    fn lower_indexed_compound(
+        &mut self,
+        op: Op,
+        index: &syn::ExprIndex,
+        value: &syn::Expr,
+    ) -> syn::Result<()> {
+        let (place, at) = self.indexed_target(index)?;
+        let region = self.load_region(&place, 0, &index.expr)?;
+        let at_cell = self.checked_index(at, 0, move |this| this.load(region.len))?;
+        let addr = self.cell(Width::U64, index)?;
+        self.load(region.base)?;
+        self.load(at_cell)?;
+        self.push_instr(Add)?;
+        self.store(addr)?;
+
+        // load-modify-store: the address stays under the new byte for the
+        // store, and a second load of it reads the old byte.
+        self.load(addr)?;
+        self.load(addr)?;
+        self.push_instr(Ld8)?;
+        let right = self.lower_expr(value, Scalar::U8, (2 * WORD_SIZE) as u32)?;
+        if right.width != Width::U8 {
+            return Err(err(value, "the operands must be the same width"));
+        }
+        self.emit_op(op, Scalar::U8)?;
+        self.push_instr(St8)?;
+        Ok(())
+    }
+
+    /// The region a write indexes, and the index expression, refusing a
+    /// constant (which is the program's, not the input's) and a range (which
+    /// would be a slice assignment).
+    fn indexed_target<'a>(&self, index: &'a syn::ExprIndex) -> syn::Result<(Place, &'a syn::Expr)> {
+        if let syn::Expr::Range(range) = unparen(&index.index) {
+            return Err(err(
+                range,
+                "a slice cannot be assigned; write one element at a time",
+            ));
+        }
+        let place = match self.classify(&index.expr)? {
+            Receiver::Place(place) => place,
+            Receiver::Table(_) => {
+                return Err(err(
+                    &index.expr,
+                    "a constant cannot be written: it lives in the program, not the input",
+                ));
+            }
+            Receiver::Walk(_) => return Err(err(&index.expr, "a walk cannot be written")),
+        };
+        Ok((place, &index.index))
     }
 
     /// Resolves an assignment target to the local cell it writes.
