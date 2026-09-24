@@ -61,7 +61,7 @@ compile time with an error pointing at the offending code.
 - `as` casts between the machine's scalars
 - Byte regions: `Bytes`, `String` and `Vec<u8>` fields (or one as the whole
   parameter), walked with `for b in p.body.iter()`, measured with `.len()`,
-  and indexed with `p.body[i]` behind a bounds check
+  and indexed with `p.body[i]` behind a bounds check, read or written in place
 - Returning a region: a `Bytes`, `String` or `Vec<u8>` result is a slice of the
   input, which the caller copies out of the buffer it already sent
 - `const` and `static` items declared inside the body: a scalar folds into the
@@ -101,7 +101,11 @@ every field offset is still a compile-time constant and the linker stays
 `const`. The guest walks it the way plain Rust does; `.len()` is a `usize` to
 Rust and a word to the machine, so narrow it with `as` where you need to.
 `p.body[i]` reads one byte behind a check against the region's length, and an
-index past it aborts the run where Rust would panic.
+index past it aborts the run where Rust would panic. A `mut` parameter can be
+written the same way — `m.body[i] = v`, or `m.body[i] ^= k` — and the write
+lands in the image the caller sent, so returning the region hands the mutated
+bytes back. Forget the `mut` and the reference copy will not compile, so the
+macro leaves that check to it.
 
 A guest can also hand a region *back*. Return `Bytes`, `String` or `Vec<u8>`
 and the result is a slice of the input: the guest leaves a pointer and a length
