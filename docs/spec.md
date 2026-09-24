@@ -355,7 +355,10 @@ located from its header (§6.1). Its two cells are filled once, when the loop,
 `.len()` or index that names it runs, and the length is the header's claim cut
 to the input's real end. `region[i]` is `base + i` behind a check of `i`
 against that length, aborting past it (§7.6); nothing about it folds, since the
-length is the host's. It never needs the address of a frame local, which is why it
+length is the host's. The same address is an `st8` target for a write —
+`m.body[i] = v` or `m.body[i] op= k` — into a `mut` parameter, which lands in
+the image and so is visible through a returned region; whether the parameter
+may be written is the reference copy's to enforce, since it holds the `mut`. It never needs the address of a frame local, which is why it
 could land before `LEA`.
 
 A region is also what a function returns when its result does not fit a word.
