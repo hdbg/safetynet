@@ -146,8 +146,8 @@ through the image builder, the interpreter, every frame cell and both marshal
 directions, guest access and host marshalling *cannot* disagree: a mismatch is a
 type error at the `Vm<B>::run(&Program<B>)` call, not a wrong answer. This
 promotes Review §R8's first bullet from a comment to a rule. Since locals now
-live in byte memory, `B` is observable for them too, not only at the `.input`/
-`.ret` boundary. A non-`Le` build is also mildly hostile to a reverser reaching
+live in byte memory, `B` is observable for them too, not only at the `.input`
+boundary. A non-`Le` build is also mildly hostile to a reverser reaching
 for the obvious `u32::from_le_bytes` hypothesis — a free side effect, not a
 security argument.
 
@@ -358,6 +358,12 @@ against that length, aborting past it (§7.6); nothing about it folds, since the
 length is the host's. It never needs the address of a frame local, which is why it
 could land before `LEA`.
 
+A region is also what a function returns when its result does not fit a word.
+The shadow side of that is not another `Ty` but the function's own: a body
+either leaves a word on the stack or leaves a pointer and a length there
+(§7.7), and the two are exclusive, so the lowerer carries which one it is
+rather than a type for a value that never exists as an operand.
+
 A `Const` is a `const` or immutable `static` of the body whose type is a
 scalar: it has no cell at all, every use pushes the word. A `Table` is one
 whose type is `[T; N]`, `&[T; N]`, `&[T]` or `&str` with `T` a machine scalar:
@@ -443,12 +449,14 @@ base. Nothing write-protects the region: there is one address space, and the
 lowerer never emits a store to a computed address, so the only thing that could
 write there is a program built by hand.
 
-One more is specified and **not yet present**: `.ret` (the marshalled return
-slot) arrives with marshalling; until then a program's result is the word on
-top of the stack when it halts. Reserving it early buys nothing precisely
-*because* bases are computed: adding a region later shifts what follows it and
-breaks nothing, since both sides read the layout — which is how `.rodata` went
-in between `.input` and `.scratch` without moving `.input`.
+A result too big for the word a run halts on does not need a region of its own
+(§7.7): the guest leaves a pointer and a length on the stack, and the host
+reads the bytes out of memory at that pointer. So there is no `.ret`, and the
+image did not have to grow one.
+
+Adding a region late costs nothing precisely *because* bases are computed:
+`.rodata` went in between `.input` and `.scratch` without moving `.input`,
+since both sides read the layout rather than a constant.
 
 `.input` is a **fixed part followed by a tail**. The fixed part is the
 parameters' `VmLayout` packing, sized at compile time. A variable-length field
@@ -555,7 +563,7 @@ the reference (Review §R2 shows why that is not sufficient).
 
 ### 7.4 Result and `?`
 `Result<T, E>` is a two-variant data enum. `?` lowers to a tag-branch: on `Err`,
-store into `.ret` and jump to the epilogue. Restricted to a **single fixed error
+leave the error as the result and jump to the epilogue. Restricted to a **single fixed error
 type** — `From`-converting `?` is rejected, since cross-type conversion is
 generic trait dispatch the subset cannot do.
 
@@ -570,7 +578,7 @@ This is the same cross-macro blindness that forced §6.2's deferred field
 resolution, and unlike offsets it has no `LAYOUT`-style escape — a callee's body
 is not reachable through a trait const. Calls to the **host** go through a closed,
 author-registered table indexed by `HOST k`, recognized via `#[safetynet::host]`,
-args/return marshalled through `.args`/`.ret`. Arbitrary std/library calls are
+args and return passed on the stack. Arbitrary std/library calls are
 rejected. A `HOST k` is a labeled signpost in the disassembly — for I/O, not for
 hiding the crypto you want reversed.
 
@@ -606,6 +614,44 @@ the declared type. The reference copy also owns every type question the
 lowerer does not police — `.iter()` on a `&str`, a `u8` index — so the lowerer
 only has to be consistent with it, never ahead of it.
 
+### 7.7 Returning a region
+
+Every result rides the operand stack the run halts on. A scalar is one word,
+which the host reads through the sealed `VmReturn` trait. A `Bytes`, `String`
+or `Vec<u8>` is two words — a pointer, then a length — and the host reads the
+bytes between them out of the machine's memory. A tuple, later, is its parts in
+order, which is why the host reads through a threaded cursor rather than a fixed
+slot: each `VmReturn` pulls the words it needs and leaves the rest.
+
+Nothing is allocated and nothing is copied inside the machine, because the
+result is never built there. It is a *description* of bytes that already exist,
+so the one copy that happens is the host reading them back after the halt. That
+is the whole reason this tier arrives before a guest can write bytes at all:
+returning a slice needs no place to put one, and it leaves the machine's first
+absolute store still unwritten.
+
+The pointer is absolute into the whole address space, so the contract says
+nothing about which region the bytes live in: today a returned slice points
+into `.input`, and a future string built in `.scratch` would return a scratch
+pointer through the identical reader. The pointer is the guest's, so the host
+clamps it to memory — a start past the end is empty, an overlong length is cut —
+the same discipline the guest applies to a header the host wrote.
+
+The source spells the conversion that owns the slice — `Bytes::from(&m.body[2..])`,
+`m.body[..2].to_vec()`, or a bare field that moves — because a slice is
+borrowed and a result is not. The macro looks straight through the conversion
+to the slice under it and lets the reference copy decide whether that
+conversion produces the return type, the same division of labour `.typed()`
+rests on. A range's ends are checked as Rust checks them, `start <= end` and
+`end <= len` against the region's clamped length, and `ABORT` stands where the
+panic would.
+
+Two limits follow from the macro not seeing types. The machine slices bytes, so
+range-slicing a `String` directly matches Rust only while the text is ASCII;
+`as_bytes()` is the honest spelling otherwise. And the returned region must
+name the *input*: a constant lives in `.rodata`, which the caller has no buffer
+for, and is refused.
+
 ---
 
 ## 8. Intermediate representation
@@ -621,7 +667,6 @@ enum Terminator {
     Jmp(BlockId),
     Br { then: BlockId, els: BlockId },
     Switch { arms: Vec<BlockId>, default: BlockId },      // default mandatory, §R2
-    Ret,
     Halt,
     Abort,                                                // stop with Trap::Aborted
 }
