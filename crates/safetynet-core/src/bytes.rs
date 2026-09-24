@@ -1,7 +1,7 @@
 //! Variable-length byte regions: content that lives past the fixed part of its
 //! aggregate, found again through a header that never moves.
 
-use core::ops::Deref;
+use core::ops::{Deref, DerefMut};
 
 use crate::ByteOrder;
 use crate::marshal::{Field, Tail, TypeLayout, VmLayout};
@@ -42,6 +42,14 @@ impl Deref for Bytes {
 
     fn deref(&self) -> &[u8] {
         &self.0
+    }
+}
+
+// So guest code can write a byte in place, `m.body[i] = v`, the same way it
+// can for a `Vec<u8>`. The reference copy needs the mutable index to compile.
+impl DerefMut for Bytes {
+    fn deref_mut(&mut self) -> &mut [u8] {
+        &mut self.0
     }
 }
 
