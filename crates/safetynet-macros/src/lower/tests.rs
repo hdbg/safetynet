@@ -71,8 +71,11 @@ fn a_wider_parameter_reads_at_its_width() {
 }
 
 #[test]
-fn a_non_scalar_return_is_refused() {
-    assert!(refusal("fn f() -> String { todo!() }").contains("scalar"));
+fn a_return_type_the_machine_cannot_hold_is_refused() {
+    assert!(refusal("fn f() -> u16 { 7 }").contains("scalar the machine can hold"));
+    // A region return type is accepted; the body still has to name a region.
+    assert!(refusal("fn f() -> String { todo!() }").contains("byte region of the input"));
+    assert!(refusal("fn f() -> Bytes { 7 }").contains("byte region of the input"));
 }
 
 #[test]
@@ -826,4 +829,165 @@ fn every_spelling_of_a_region_index_resolves() {
     assert_resolves(&graph(
         "fn f(p: Msg) -> u32 { let mut s: u32 = 0; for i in 0..4 { s += p.body[i as usize] as u32; } s }",
     ));
+}
+
+#[test]
+fn a_whole_region_returns_a_pointer_and_a_length() {
+    let cfg = graph("fn f(m: Msg) -> Bytes { m.body }");
+    assert_eq!(
+        format!("{cfg:?}"),
+        "\
+.frame { c0: u64, c1: u32, c2: u64, c3: u64 }
+b0:
+    $push .input
+    $field #0
+    add
+    $loadfield #0
+    $push .input
+    add
+    $store c0
+    $push .input
+    $field #1
+    add
+    $loadfield #1
+    $store c1
+    $load c0
+    $load c1
+    add
+    $push .input
+    $len .input
+    add
+    le
+    jnz b2
+b1:
+    push8 0
+    $store c1
+    jmp b2
+b2:
+    push8 0
+    $store c2
+    $load c1
+    $store c3
+    $load c3
+    $load c2
+    sub
+    $load c0
+    $load c2
+    add
+    halt
+",
+        "no guard: neither end was written; the length is deep and the pointer on top"
+    );
+    assert_resolves(&cfg);
+}
+
+#[test]
+fn a_returned_range_checks_both_of_its_ends() {
+    let cfg = graph("fn f(m: Msg) -> Bytes { m.body[2..5] }");
+    let listing = format!("{cfg:?}");
+    assert!(
+        listing.contains(
+            "b2:\n    push8 2\n    $store c2\n    push8 5\n    $store c3\n    \
+             $load c3\n    $load c1\n    le\n    jnz b4\nb3:\n    abort\n"
+        ),
+        "the end is checked against the clamped length\n{listing}"
+    );
+    assert!(
+        listing.contains("b4:\n    $load c2\n    $load c3\n    le\n    jz b3\n"),
+        "then the start against the end, sharing one abort\n{listing}"
+    );
+    assert!(
+        listing.ends_with(
+            "$load c3\n    $load c2\n    sub\n    $load c0\n    $load c2\n    add\n    halt\n"
+        ),
+        "the result is length then pointer, no store\n{listing}"
+    );
+    assert_resolves(&cfg);
+}
+
+#[test]
+fn only_the_ends_that_were_written_are_checked() {
+    let count = |source: &str| format!("{:?}", graph(source)).matches("abort").count();
+    assert_eq!(count("fn f(m: Msg) -> Bytes { m.body }"), 0);
+    assert_eq!(count("fn f(m: Msg) -> Bytes { m.body[..] }"), 0);
+    assert_eq!(count("fn f(m: Msg) -> Bytes { m.body[2..] }"), 1);
+    assert_eq!(count("fn f(m: Msg) -> Bytes { m.body[..2] }"), 1);
+    assert_eq!(count("fn f(m: Msg) -> Bytes { m.body[1..2] }"), 1);
+}
+
+#[test]
+fn every_spelling_of_a_returned_slice_resolves() {
+    for body in [
+        "m.body",
+        "Bytes::from(&m.body[2..])",
+        "m.body[..2].to_vec()",
+        "m.name.as_bytes().to_vec()",
+        "m.name[1..].to_string()",
+        "Bytes::new(&m.body[..])",
+        "m.body[..]",
+        "m.body[1..]",
+        "m.body[..1]",
+        "m.body[1..2]",
+        "(m.body)[1..]",
+        "m.body[m.body.len() - 1..]",
+        "m.body[m.kind.typed::<u8>() as usize..]",
+        "m.name.as_bytes()[1..]",
+        "m.header.body[1..]",
+        "return m.body[1..]",
+        "if m.kind.typed::<u8>() == 0 { return m.body; } else { return m.name.as_bytes()[..1]; }",
+    ] {
+        assert_resolves(&graph(&format!("fn f(m: Msg) -> Bytes {{ {body} }}")));
+    }
+    assert_resolves(&graph("fn f(s: String) -> String { s[1..] }"));
+    assert_resolves(&graph("fn f(v: Vec<u8>) -> Vec<u8> { v }"));
+    assert_resolves(&graph(
+        "fn f(m: Msg) -> Bytes { let mut i: u64 = 0; while i < 4 { i += 1; } m.body[i as usize..] }",
+    ));
+}
+
+#[test]
+fn a_returned_slice_must_name_the_input() {
+    assert!(refusal("fn f(m: Msg) -> Bytes { m.body[1..=2] }").contains("`..=`"));
+    assert!(
+        refusal("fn f(m: Msg) -> Bytes { m.body[m.kind.typed::<u8>()..] }")
+            .contains("a slice bound must be a `usize`")
+    );
+    assert!(
+        refusal("fn f(m: Msg) -> Bytes { const K: [u8; 2] = [1, 2]; K[..] }")
+            .contains("lives in the program, not the input")
+    );
+    assert!(refusal("fn f(m: Msg) -> Bytes { m.body.iter() }").contains("walk cannot be returned"));
+    assert!(refusal("fn f(m: Msg) -> Bytes { m.body[1] }").contains("needs a range"));
+    assert!(
+        refusal("fn f(m: Msg) -> u8 { m.body[1..2] }")
+            .contains("a slice is only a function's result")
+    );
+    assert!(refusal("fn f(m: Msg) -> Bytes { 7 }").contains("byte region of the input"));
+    assert!(
+        refusal("fn f(m: Msg) -> Bytes { Bytes::from(&7[1..]) }")
+            .contains("byte region of the input")
+    );
+}
+
+/// The conversion is the reference copy's to check; what the machine needs is
+/// the slice under it, whichever way it was spelled.
+#[test]
+fn an_owning_conversion_lowers_to_the_slice_under_it() {
+    let bare = format!("{:?}", graph("fn f(m: Msg) -> Bytes { m.body[2..] }"));
+    for spelling in [
+        "Bytes::from(&m.body[2..])",
+        "Bytes::new(&m.body[2..])",
+        "m.body[2..].to_vec()",
+        "m.body[2..].to_owned()",
+        "(&m.body[2..]).to_vec()",
+    ] {
+        assert_eq!(
+            format!(
+                "{:?}",
+                graph(&format!("fn f(m: Msg) -> Bytes {{ {spelling} }}"))
+            ),
+            bare,
+            "{spelling} lowers the same as the slice it owns"
+        );
+    }
 }

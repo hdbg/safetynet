@@ -86,6 +86,7 @@ pub(crate) fn expand(attr: TokenStream, item: TokenStream) -> syn::Result<TokenS
     let args = param_names(&func)?;
     let fuel = Literal::u64_suffixed(FUEL);
     let (fixed_len, marshal) = input_shape(aggregate.as_ref(), &args, &param_offsets, input_size);
+
     let public = quote! {
         #(#attrs)*
         #vis #sig {
@@ -127,7 +128,7 @@ pub(crate) fn expand(attr: TokenStream, item: TokenStream) -> syn::Result<TokenS
                     ::safetynet::__private::Failure::NotFinal(__sn_error),
                 ),
             };
-            let mut __sn_vm = match ::safetynet::Vm::<::safetynet::Le>::new(__sn_image)
+            let __sn_vm = match ::safetynet::Vm::<::safetynet::Le>::new(__sn_image)
                 .run(&__sn_program, #fuel)
             {
                 ::core::result::Result::Ok(__sn_vm) => __sn_vm,
@@ -135,13 +136,11 @@ pub(crate) fn expand(attr: TokenStream, item: TokenStream) -> syn::Result<TokenS
                     ::safetynet::__private::Failure::Trap(__sn_trap),
                 ),
             };
-            let __sn_result = match __sn_vm.pop() {
-                ::core::result::Result::Ok(__sn_word) => __sn_word,
-                ::core::result::Result::Err(__sn_trap) => ::safetynet::__private::fail(
-                    ::safetynet::__private::Failure::Trap(__sn_trap),
-                ),
-            };
-            <#ret as ::safetynet::VmValue>::from_word(__sn_result)
+            // A result reads back the same way whatever its shape: a scalar
+            // takes one word, a region a pointer and a length plus the bytes
+            // they name. The reader is threaded, so a tuple would take its
+            // parts in turn.
+            <#ret as ::safetynet::VmReturn>::from_ret::<::safetynet::Le>(&mut __sn_vm.ret())
         }
     };
 
@@ -151,8 +150,10 @@ pub(crate) fn expand(attr: TokenStream, item: TokenStream) -> syn::Result<TokenS
         const _: fn() = || {
             fn __sn_assert_vm_value<__T: ::safetynet::VmValue>() {}
             fn __sn_assert_vm_layout<__T: ::safetynet::VmLayout>() {}
+            fn __sn_assert_vm_return<__T: ::safetynet::VmReturn>() {}
             #( __sn_assert_vm_value::<#bindings>(); )*
             #( __sn_assert_vm_layout::<#layouts>(); )*
+            __sn_assert_vm_return::<#ret>();
         };
     };
 

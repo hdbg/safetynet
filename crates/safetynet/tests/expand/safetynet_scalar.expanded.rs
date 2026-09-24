@@ -44,7 +44,7 @@ fn inc(x: u32) -> u32 {
             )
         }
     };
-    let mut __sn_vm = match ::safetynet::Vm::<::safetynet::Le>::new(__sn_image)
+    let __sn_vm = match ::safetynet::Vm::<::safetynet::Le>::new(__sn_image)
         .run(&__sn_program, 1000000u64)
     {
         ::core::result::Result::Ok(__sn_vm) => __sn_vm,
@@ -54,15 +54,7 @@ fn inc(x: u32) -> u32 {
             )
         }
     };
-    let __sn_result = match __sn_vm.pop() {
-        ::core::result::Result::Ok(__sn_word) => __sn_word,
-        ::core::result::Result::Err(__sn_trap) => {
-            ::safetynet::__private::fail(
-                ::safetynet::__private::Failure::Trap(__sn_trap),
-            )
-        }
-    };
-    <u32 as ::safetynet::VmValue>::from_word(__sn_result)
+    <u32 as ::safetynet::VmReturn>::from_ret::<::safetynet::Le>(&mut __sn_vm.ret())
 }
 fn __sn_program_inc() -> ::safetynet::Artifact<::safetynet::Le> {
     {
@@ -96,7 +88,8 @@ fn __sn_program_inc() -> ::safetynet::Artifact<::safetynet::Le> {
 const _: fn() = || {
     fn __sn_assert_vm_value<__T: ::safetynet::VmValue>() {}
     fn __sn_assert_vm_layout<__T: ::safetynet::VmLayout>() {}
+    fn __sn_assert_vm_return<__T: ::safetynet::VmReturn>() {}
     __sn_assert_vm_value::<u32>();
-    __sn_assert_vm_value::<u32>();
+    __sn_assert_vm_return::<u32>();
 };
 fn main() {}
