@@ -991,3 +991,113 @@ fn an_owning_conversion_lowers_to_the_slice_under_it() {
         );
     }
 }
+
+#[test]
+fn an_indexed_store_writes_a_byte_in_place() {
+    let cfg = graph("fn f(mut m: Msg) -> u8 { m.body[1] = 7; 0 }");
+    assert_eq!(
+        format!("{cfg:?}"),
+        "\
+.frame { c0: u64, c1: u32, c2: u64 }
+b0:
+    $push .input
+    $field #0
+    add
+    $loadfield #0
+    $push .input
+    add
+    $store c0
+    $push .input
+    $field #1
+    add
+    $loadfield #1
+    $store c1
+    $load c0
+    $load c1
+    add
+    $push .input
+    $len .input
+    add
+    le
+    jnz b2
+b1:
+    push8 0
+    $store c1
+    jmp b2
+b2:
+    push8 1
+    $store c2
+    $load c2
+    $load c1
+    lt
+    jz b4
+b3:
+    $load c0
+    $load c2
+    add
+    push8 7
+    st8
+    push8 0
+    halt
+b4:
+    abort
+",
+        "the index is checked against the clamped length, then base + i is the store address"
+    );
+    assert_resolves(&cfg);
+}
+
+#[test]
+fn a_compound_indexed_store_reads_modifies_and_writes() {
+    let cfg = graph("fn f(mut m: Msg) -> u8 { m.body[1] ^= 9; 0 }");
+    let listing = format!("{cfg:?}");
+    // The address is named once in a cell, then loaded twice: once under the
+    // new byte for the store, once to read the old byte.
+    assert!(
+        listing.contains(
+            "add\n    $store c3\n    $load c3\n    $load c3\n    ld8\n    push8 9\n    xor\n    push8 255\n    and\n    st8\n"
+        ),
+        "{listing}"
+    );
+    assert_resolves(&cfg);
+}
+
+#[test]
+fn every_spelling_of_an_indexed_store_resolves() {
+    for stmt in [
+        "m.body[0] = 1",
+        "m.body[i as usize] = 2",
+        "(m.body)[0] = 3",
+        "m.name.as_bytes()[0] = 4",
+        "m.body[m.body.len() - 1] = 5",
+        "m.body[i as usize] ^= 0x5a",
+        "m.body[0] += 1",
+        "m.body[0] -= 1",
+        "m.body[0] &= 15",
+        "m.body[0] |= 8",
+    ] {
+        assert_resolves(&graph(&format!(
+            "fn f(mut m: Msg) -> u8 {{ let i: u32 = 0; {stmt}; 0 }}"
+        )));
+    }
+    assert_resolves(&graph("fn f(mut v: Vec<u8>) -> u8 { v[0] = 9; 0 }"));
+    assert_resolves(&graph(
+        "fn f(mut m: Msg) -> u8 { let mut i: u64 = 0; while i < m.body.len() { m.body[i as usize] ^= 7; i += 1; } 0 }",
+    ));
+}
+
+#[test]
+fn an_indexed_store_refuses_what_it_cannot_write() {
+    assert!(
+        refusal("fn f() -> u8 { const K: [u8; 2] = [1, 2]; K[0] = 3; 0 }")
+            .contains("lives in the program, not the input")
+    );
+    assert!(
+        refusal("fn f(mut m: Msg) -> u8 { m.body[0..1] = 3; 0 }")
+            .contains("a slice cannot be assigned")
+    );
+    assert!(
+        refusal("fn f(mut m: Msg) -> u8 { m.body[m.kind.typed::<u8>()] = 0; 0 }")
+            .contains("cast it with `as usize`")
+    );
+}

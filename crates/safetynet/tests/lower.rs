@@ -950,3 +950,51 @@ fn a_slice_starting_past_the_region_aborts_the_run() {
 fn a_slice_ending_past_the_region_aborts_the_run() {
     let _ = body_head(message(b"a", ""));
 }
+
+#[safetynet]
+fn xor_body(mut m: Msg) -> Bytes {
+    let mut i: u64 = 0;
+    while i < m.body.len() as u64 {
+        m.body[i as usize] ^= 0x5a;
+        i += 1;
+    }
+    m.body
+}
+
+#[safetynet]
+fn set_first(mut v: Vec<u8>) -> Vec<u8> {
+    v[0] = 0xff;
+    v
+}
+
+#[safetynet]
+fn poke(mut m: Msg) -> Bytes {
+    m.body[1] = b'Z';
+    m.body
+}
+
+#[safetynet]
+fn poke_far(mut m: Msg) -> Bytes {
+    m.body[5] = 0;
+    m.body
+}
+
+#[test]
+fn an_in_place_write_shows_up_in_the_returned_region() {
+    let m = message(b"attack", "");
+    let out = xor_body(m);
+    let expected: Vec<u8> = b"attack".iter().map(|b| b ^ 0x5a).collect();
+    assert_eq!(out.as_slice(), expected.as_slice());
+}
+
+#[test]
+fn a_single_byte_is_written_where_it_is_asked() {
+    assert_eq!(set_first(vec![1, 2, 3]), vec![0xff, 2, 3]);
+    assert_eq!(poke(message(b"abc", "")).as_slice(), b"aZc");
+}
+
+#[test]
+#[should_panic(expected = "safetynet")]
+fn a_write_past_the_region_aborts_the_run() {
+    let _ = poke_far(message(b"ab", ""));
+}
