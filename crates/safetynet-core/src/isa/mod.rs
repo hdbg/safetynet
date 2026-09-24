@@ -72,7 +72,7 @@ pub trait Op:
 }
 
 define_ops! {
-    /// Stops the machine. The return value, if any, is already in `.ret`.
+    /// Stops the machine. The result, if any, is already on top of the stack.
     Halt = "halt", sp(|_| 0), exec(|_, _| Ok(Flow::Halt));
 
     /// Pushes a byte constant, zero-extended to a word.

@@ -30,7 +30,10 @@ use core::marker::PhantomData;
 use crate::image::{Image, Layout, Region};
 use crate::{ByteOrder, FrameSize, Instr, WORD_SIZE, Width, Word};
 
+pub(crate) mod ret;
 mod run;
+
+pub use ret::{Ret, VmReturn};
 
 crate::opaque_debug!(Flow, Vm<B: ByteOrder>);
 crate::opaque_error!(Trap);
@@ -225,6 +228,14 @@ impl<B: ByteOrder> Vm<B> {
     /// Where every region of this machine's address space lives.
     pub const fn layout(&self) -> &Layout {
         &self.layout
+    }
+
+    /// A view of what the machine left, for reading a result after it halts.
+    ///
+    /// The result sits on top of the operand stack; this hands back a reader
+    /// over it and the memory a returned pointer can name.
+    pub fn ret(&self) -> Ret<'_, B> {
+        Ret::new(&self.memory, self.stack.start, self.sp)
     }
 
     /// The bytes of one region, for a host reading a result back out.
