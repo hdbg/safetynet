@@ -41,7 +41,7 @@ pub mod __private {
     pub use crate::failure::{Failure, fail};
     pub use crate::value::sealed::Sealed;
 }
-pub use vm::{Flow, Trap, Vm};
+pub use vm::{Flow, Ret, Trap, Vm, VmReturn};
 pub use width::Width;
 
 #[cfg(test)]

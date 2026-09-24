@@ -5,6 +5,8 @@ use core::ops::Deref;
 
 use crate::ByteOrder;
 use crate::marshal::{Field, Tail, TypeLayout, VmLayout};
+use crate::vm::ret::sealed as ret_sealed;
+use crate::vm::{Ret, VmReturn};
 
 /// Owned bytes that cross into the VM as a length-prefixed region.
 ///
@@ -121,6 +123,14 @@ fn marshal_region<B: ByteOrder>(content: &[u8], slot: &mut [u8], tail: &mut Tail
     write_field::<B>(slot, LEN, len, tail);
 }
 
+/// The bytes a region result names: a pointer then a length off the stack,
+/// then the memory between them, clamped since the guest chose both.
+fn region_result<'a, B: ByteOrder>(ret: &mut Ret<'a, B>) -> &'a [u8] {
+    let at = ret.word().unwrap_or(0);
+    let len = ret.word().unwrap_or(0);
+    ret.bytes(at, len)
+}
+
 /// Follows the header in `slot` into `input`.
 ///
 /// The header is data, so it is not trusted: content that runs past the input
@@ -134,6 +144,13 @@ fn region_content<'a, B: ByteOrder>(slot: &[u8], input: &'a [u8]) -> &'a [u8] {
         .unwrap_or(&[])
 }
 
+impl ret_sealed::Return for Bytes {}
+impl VmReturn for Bytes {
+    fn from_ret<B: ByteOrder>(ret: &mut Ret<'_, B>) -> Self {
+        Self(region_result(ret).to_vec())
+    }
+}
+
 impl VmLayout for Bytes {
     const LAYOUT: &'static TypeLayout = HEADER;
     const SIZE: usize = HEADER_SIZE;
@@ -145,6 +162,13 @@ impl VmLayout for Bytes {
 
     fn unmarshal<B: ByteOrder>(slot: &[u8], input: &[u8]) -> Self {
         Self(region_content::<B>(slot, input).to_vec())
+    }
+}
+
+impl ret_sealed::Return for Vec<u8> {}
+impl VmReturn for Vec<u8> {
+    fn from_ret<B: ByteOrder>(ret: &mut Ret<'_, B>) -> Self {
+        region_result(ret).to_vec()
     }
 }
 
@@ -165,6 +189,13 @@ impl VmLayout for Vec<u8> {
 /// A string crosses as its UTF-8 bytes. Coming back, content that is not UTF-8
 /// reads as empty: the header was data, and data does not get to make a
 /// `String` invalid.
+impl ret_sealed::Return for String {}
+impl VmReturn for String {
+    fn from_ret<B: ByteOrder>(ret: &mut Ret<'_, B>) -> Self {
+        Self::from_utf8(region_result(ret).to_vec()).unwrap_or_default()
+    }
+}
+
 impl VmLayout for String {
     const LAYOUT: &'static TypeLayout = HEADER;
     const SIZE: usize = HEADER_SIZE;
@@ -294,3 +325,76 @@ mod tests {
 }
 
 crate::opaque_debug!(Bytes);
+
+#[cfg(test)]
+mod return_tests {
+    use super::*;
+    use crate::Le;
+    use crate::image::{Image, Layout, Sizes};
+    use crate::isa::{Halt, Push64};
+    use crate::vm::Vm;
+
+    /// Runs a tiny program that pushes `words` and halts, then reads a `T`
+    /// result out of what it left. The words are pushed in order, so the last
+    /// is on top and read first.
+    fn returns<T: VmReturn>(words: &[u64], input: &[u8]) -> T {
+        let layout = Layout::new(Sizes {
+            input: input.len() as u32,
+            stack: 4096,
+            ..Sizes::default()
+        })
+        .expect("fits");
+        let mut image = Image::new(layout);
+        image
+            .write(crate::Region::Input, input)
+            .expect("input fits");
+
+        let mut code = Vec::new();
+        for word in words {
+            crate::encoding::encode::<Le>(Push64 { imm: *word }.into(), &mut code).expect("push");
+        }
+        crate::encoding::encode::<Le>(Halt.into(), &mut code).expect("halt");
+        let program = crate::Program::<Le>::new(code, crate::FrameSize::default());
+
+        let vm = Vm::<Le>::new(image).run(&program, 100).expect("runs");
+        T::from_ret(&mut vm.ret())
+    }
+
+    /// A region result is a pointer and a length off the stack, read out of
+    /// memory. The input sits at address 0, so a pointer into it is its offset.
+    #[test]
+    fn a_region_result_reads_the_bytes_a_pointer_names() {
+        let input = b"hello world";
+        // push length (deep) then pointer (top): the reader takes the pointer
+        // first.
+        assert_eq!(returns::<Bytes>(&[5, 6], input).as_slice(), b"world");
+        assert_eq!(returns::<Vec<u8>>(&[11, 0], input), input.to_vec());
+        assert_eq!(returns::<String>(&[5, 0], input), "hello");
+    }
+
+    /// The pointer and length are the guest's, so they are clamped to the
+    /// address space, never trusted: a start past the end of memory is empty
+    /// and an overlong length is cut, so a forged result reads adjacent memory
+    /// the guest could already see, never past the image or a panic.
+    #[test]
+    fn a_forged_pointer_or_length_is_clamped() {
+        let input = b"hello world";
+        // A start past the whole image is empty. The image is far under this.
+        assert_eq!(returns::<Bytes>(&[1, 1_000_000], input).as_slice(), b"");
+        // A length past the image end is cut there rather than panicking.
+        assert!(
+            returns::<Bytes>(&[u64::MAX, 6], input)
+                .as_slice()
+                .starts_with(b"world")
+        );
+        assert_eq!(returns::<String>(&[0, 0], input), "");
+    }
+
+    /// A scalar result is one word, the same word it would have widened into.
+    #[test]
+    fn a_scalar_result_is_one_word() {
+        assert_eq!(returns::<u32>(&[42], b""), 42);
+        assert_eq!(returns::<i8>(&[u64::MAX], b""), -1);
+        assert!(returns::<bool>(&[1], b""));
+    }
+}

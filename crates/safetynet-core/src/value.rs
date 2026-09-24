@@ -1,7 +1,10 @@
 //! Scalars that fit one VM [`Word`]. The conversions carry no byte order:
 //! widening and narrowing a word, not laying out bytes.
 
+use crate::ByteOrder;
 use crate::Word;
+use crate::vm::ret::sealed as ret_sealed;
+use crate::vm::{Ret, VmReturn};
 
 pub(crate) mod sealed {
     /// Seals [`VmValue`](super::VmValue): only this crate and its derives name it.
@@ -41,6 +44,20 @@ macro_rules! impl_vm_value {
 }
 
 impl_vm_value!(u8, u16, u32, u64, i8, i16, i32, i64);
+
+/// A scalar comes back in one word, the same word it widened into.
+macro_rules! impl_vm_return {
+    ($($ty:ty),+ $(,)?) => {$(
+        impl ret_sealed::Return for $ty {}
+        impl VmReturn for $ty {
+            fn from_ret<B: ByteOrder>(ret: &mut Ret<'_, B>) -> Self {
+                <$ty as VmValue>::from_word(ret.word().unwrap_or(0))
+            }
+        }
+    )+};
+}
+
+impl_vm_return!(u8, u16, u32, u64, i8, i16, i32, i64, bool);
 
 impl sealed::Sealed for bool {}
 impl VmValue for bool {
