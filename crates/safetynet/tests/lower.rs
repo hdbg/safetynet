@@ -854,3 +854,99 @@ fn an_index_past_the_region_aborts_the_run() {
 fn an_empty_region_has_no_first_byte() {
     let _ = first(Vec::new());
 }
+
+#[safetynet]
+fn whole_body(m: Msg) -> Bytes {
+    m.body
+}
+
+#[safetynet]
+fn body_tail(m: Msg) -> Bytes {
+    Bytes::from(&m.body[2..])
+}
+
+#[safetynet]
+fn body_head(m: Msg) -> Vec<u8> {
+    m.body[..2].to_vec()
+}
+
+#[safetynet]
+fn name_tail(m: Msg) -> String {
+    m.name[1..].to_string()
+}
+
+#[safetynet]
+fn body_last(m: Msg) -> Bytes {
+    Bytes::from(&m.body[m.body.len() - 1..])
+}
+
+#[safetynet]
+fn body_from_kind(m: Msg) -> Bytes {
+    Bytes::from(&m.body[m.kind.typed::<u8>() as usize..])
+}
+
+#[safetynet]
+fn whole_vec(v: Vec<u8>) -> Vec<u8> {
+    v
+}
+
+/// A message whose body is the bytes and whose name is the string.
+fn message(body: &[u8], name: &str) -> Msg {
+    Msg {
+        kind: 1,
+        body: Bytes::from(body),
+        name: String::from(name),
+        tag: 0,
+    }
+}
+
+#[test]
+fn a_returned_region_is_the_input_sliced() {
+    let m = message(b"abcdef", "wxyz");
+    assert_eq!(whole_body(m.clone()).as_slice(), b"abcdef");
+    assert_eq!(body_tail(m.clone()).as_slice(), b"cdef");
+    assert_eq!(body_head(m.clone()), b"ab".to_vec());
+    assert_eq!(name_tail(m.clone()), "xyz");
+    assert_eq!(body_last(m.clone()).as_slice(), b"f");
+    assert_eq!(body_from_kind(m).as_slice(), b"bcdef");
+    assert_eq!(whole_vec(vec![7, 8, 9]), vec![7, 8, 9]);
+}
+
+/// Every fixture above agrees with the plain Rust it was written as, which is
+/// the only claim the machine actually makes.
+#[test]
+fn a_returned_region_agrees_with_the_reference() {
+    for (body, name) in [
+        (b"abcdef".as_slice(), "wxyz"),
+        (b"gh".as_slice(), "ij"),
+        (b"".as_slice(), "k"),
+    ] {
+        let m = message(body, name);
+        if body.len() >= 2 {
+            assert_eq!(body_tail(m.clone()).as_slice(), &body[2..]);
+            assert_eq!(body_head(m.clone()), body[..2].to_vec());
+        }
+        assert_eq!(whole_body(m.clone()).as_slice(), body);
+        assert_eq!(name_tail(m).as_str(), &name[1..]);
+    }
+}
+
+#[test]
+fn an_empty_region_comes_back_empty() {
+    let m = message(b"", "");
+    assert_eq!(whole_body(m).as_slice(), b"");
+    assert_eq!(whole_vec(Vec::new()), Vec::<u8>::new());
+    assert_eq!(body_from_kind(message(b"x", "")).as_slice(), b"");
+}
+
+#[test]
+#[should_panic(expected = "safetynet")]
+fn a_slice_starting_past_the_region_aborts_the_run() {
+    let _ = body_tail(message(b"a", ""));
+}
+
+#[test]
+#[should_panic(expected = "safetynet")]
+fn a_slice_ending_past_the_region_aborts_the_run() {
+    let _ = body_head(message(b"a", ""));
+}

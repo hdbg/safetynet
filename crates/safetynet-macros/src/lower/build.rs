@@ -79,6 +79,10 @@ const FOR_ITERABLE: &str = "a `for` loop must iterate a range `a..b` or the `.it
 const OUTSIDE_PATH: &str = "a path to an item outside the function is not lowered; \
                             declare the const inside the body";
 
+/// Why a returned expression was refused.
+const RETURNED_SLICE: &str = "a returned slice must name a byte region of the input: \
+                              a field of the parameter, or the parameter itself";
+
 /// Why a const's type was refused.
 const CONST_TYPE: &str =
     "a const must be a scalar the machine can hold, an array of them, or a `&str`";
@@ -99,6 +103,16 @@ struct Loop {
     continue_to: BlockId,
     /// Where `break` goes, created on the first one a `loop` needs.
     break_to: Option<BlockId>,
+}
+
+/// What a function leaves behind when it halts.
+enum Return {
+    /// A word on top of the stack, which the caller reads as its scalar.
+    Word(Scalar),
+    /// A pointer and a length on top of the stack, which the caller reads the
+    /// bytes of out of the machine's memory. The return type is the caller's
+    /// to name; the machine leaves two numbers and copies nothing.
+    Region,
 }
 
 /// Whether a statement path continues or has already left the block.
@@ -145,12 +159,18 @@ pub(crate) fn lower(func: &syn::ItemFn) -> syn::Result<Lowered> {
     reject_odd_signature(func)?;
     let ret_ty = return_type(func)
         .ok_or_else(|| err(&func.sig.ident, "the function must return a scalar"))?;
-    let ret = Scalar::of(ret_ty).ok_or_else(|| {
-        err(
-            ret_ty,
-            "the return type must be a scalar the machine can hold",
-        )
-    })?;
+    // A scalar comes back in the word the machine halts on; anything else the
+    // caller can name comes back as a pointer and a length on the stack.
+    let ret = match Scalar::of(ret_ty) {
+        Some(scalar) => Return::Word(scalar),
+        None if ty::unsupported_primitive(ret_ty) => {
+            return Err(err(
+                ret_ty,
+                "the return type must be a scalar the machine can hold",
+            ));
+        }
+        None => Return::Region,
+    };
 
     // Parameters first: scalars pack into `.input` at their offsets; a single
     // aggregate fills `.input` on its own and is read by field.
@@ -190,7 +210,6 @@ pub(crate) fn lower(func: &syn::ItemFn) -> syn::Result<Lowered> {
         ));
     }
     let input_size = offset;
-    bindings.push(ret_ty.clone());
 
     // Locals get their cells as lowering reaches each `let`: the builder grows
     // the frame in place
@@ -251,7 +270,7 @@ pub(super) struct Lowerer {
     aggregate: Option<(String, syn::Type)>,
     /// The block instructions are being appended to.
     cur: BlockId,
-    ret: Scalar,
+    ret: Return,
 }
 
 impl Lowerer {
@@ -304,13 +323,17 @@ impl Lowerer {
     /// Lowers the last statement of the function body, where an expression is the
     /// returned value.
     fn lower_tail(&mut self, stmt: &syn::Stmt) -> syn::Result<Flow> {
+        let scalar = match self.ret {
+            Return::Word(scalar) => scalar,
+            Return::Region => return self.lower_region_tail(stmt),
+        };
         match stmt {
             syn::Stmt::Expr(syn::Expr::Return(ret), _) => {
                 self.lower_return(ret)?;
                 Ok(Flow::Diverged)
             }
             syn::Stmt::Expr(syn::Expr::If(if_expr), None) => {
-                match self.lower_if_value(if_expr, self.ret)? {
+                match self.lower_if_value(if_expr, scalar)? {
                     Value::Produced(_) => {
                         self.seal(self.cur, Terminator::Halt)?;
                         Ok(Flow::Diverged)
@@ -319,7 +342,28 @@ impl Lowerer {
                 }
             }
             syn::Stmt::Expr(expr, None) if is_value_expr(expr) => {
-                self.lower_value(expr, self.ret)?;
+                self.lower_value(expr, scalar)?;
+                self.seal(self.cur, Terminator::Halt)?;
+                Ok(Flow::Diverged)
+            }
+            other => self.lower_stmt(other),
+        }
+    }
+
+    /// Lowers the last statement of a function whose result is a region.
+    ///
+    /// A region is not a word, so there is no value form to fall back on: an
+    /// `if` here is an ordinary statement, and every path through it has to
+    /// reach a `return` of its own.
+    fn lower_region_tail(&mut self, stmt: &syn::Stmt) -> syn::Result<Flow> {
+        match stmt {
+            syn::Stmt::Expr(syn::Expr::Return(ret), _) => {
+                self.lower_return(ret)?;
+                Ok(Flow::Diverged)
+            }
+            syn::Stmt::Expr(syn::Expr::If(if_expr), None) => self.lower_if_stmt(if_expr),
+            syn::Stmt::Expr(expr, None) => {
+                self.lower_region_return(expr)?;
                 self.seal(self.cur, Terminator::Halt)?;
                 Ok(Flow::Diverged)
             }
@@ -497,8 +541,113 @@ impl Lowerer {
             .expr
             .as_ref()
             .ok_or_else(|| err(ret, "the function must return a value"))?;
-        self.lower_value(value, self.ret)?;
+        match self.ret {
+            Return::Word(scalar) => {
+                self.lower_value(value, scalar)?;
+            }
+            Return::Region => self.lower_region_return(value)?,
+        }
         self.seal(self.cur, Terminator::Halt)
+    }
+
+    /// Lowers the expression a region-returning function ends with: a slice of
+    /// the input, left on the stack as a pointer and a length.
+    ///
+    /// The machine leaves two numbers and copies nothing. The bytes stay where
+    /// the host put them, and the caller reads them out of memory — which is
+    /// why this needs neither an allocator nor a place to build one, and why
+    /// it emits no store.
+    fn lower_region_return(&mut self, expr: &syn::Expr) -> syn::Result<()> {
+        let (place, range) = region_slice(expr)?;
+        let place = self.place_of_receiver(place)?;
+        let region = self.load_region(&place, 0, expr)?;
+
+        let (from, upto) = match range {
+            Some(range) => {
+                if !matches!(range.limits, syn::RangeLimits::HalfOpen(_)) {
+                    return Err(err(range, "an inclusive `..=` slice is not supported yet"));
+                }
+                (range.start.as_deref(), range.end.as_deref())
+            }
+            None => (None, None),
+        };
+
+        // Both ends land in cells: each is read twice, once by a guard and
+        // once by the arithmetic, and there is no `dup`.
+        let start = self.cell(Width::U64, expr)?;
+        let end = self.cell(Width::U64, expr)?;
+        match from {
+            Some(bound) => self.lower_bound(bound)?,
+            None => self.push_word(0)?,
+        }
+        self.store(start)?;
+        match upto {
+            Some(bound) => self.lower_bound(bound)?,
+            // An absent end is the region's own length, already clamped to
+            // what the host actually sent.
+            None => self.load(region.len)?,
+        }
+        self.store(end)?;
+
+        // Rust panics on `a > b` and on `b > len`; the machine aborts, and
+        // only on the ends that were written, since the others cannot fail.
+        let guarded = from.is_some() || upto.is_some();
+        let abort = guarded.then(|| self.builder.block(0));
+        if let Some(abort) = abort {
+            if upto.is_some() {
+                self.load(end)?;
+                self.load(region.len)?;
+                self.push_instr(CmpLe)?;
+                self.guard(abort)?;
+            }
+            if from.is_some() {
+                self.load(start)?;
+                self.load(end)?;
+                self.push_instr(CmpLe)?;
+                self.guard(abort)?;
+            }
+            self.seal(abort, Terminator::Abort)?;
+        }
+
+        // Two words on top of the stack, which the caller reads through
+        // `VmReturn::from_ret`: an absolute pointer to the content, then its
+        // length. The pointer is `base + start`; `base` is already absolute,
+        // so nothing here names a region the caller has to know about, and the
+        // bytes stay where the host put them.
+        self.load(end)?;
+        self.load(start)?;
+        self.push_instr(Sub)?;
+        self.load(region.base)?;
+        self.load(start)?;
+        self.push_instr(Add)?;
+        Ok(())
+    }
+
+    /// Lowers a slice bound, which Rust makes a `usize`.
+    fn lower_bound(&mut self, bound: &syn::Expr) -> syn::Result<()> {
+        let ty = self.lower_expr(bound, Scalar::U64, 0)?;
+        if ty != Scalar::U64 {
+            return Err(err(
+                bound,
+                "a slice bound must be a `usize`: cast it with `as usize`",
+            ));
+        }
+        Ok(())
+    }
+
+    /// Continues in a fresh block when the flag on top holds, and aborts when
+    /// it does not.
+    fn guard(&mut self, abort: BlockId) -> syn::Result<()> {
+        let ok = self.builder.block(0);
+        self.seal(
+            self.cur,
+            Terminator::Br {
+                then: ok,
+                els: abort,
+            },
+        )?;
+        self.cur = ok;
+        Ok(())
     }
 
     /// Lowers `break`, jumping to the enclosing loop's exit.
@@ -934,6 +1083,23 @@ impl Lowerer {
         }
     }
 
+    /// The region a returned slice reads from, which has to be a place: a
+    /// constant table lives in the image, not in the input the caller holds.
+    fn place_of_receiver(&self, expr: &syn::Expr) -> syn::Result<Place> {
+        match unparen(expr) {
+            syn::Expr::Field(_) | syn::Expr::Path(_) | syn::Expr::MethodCall(_) => {}
+            other => return Err(err(other, RETURNED_SLICE)),
+        }
+        match self.classify(expr)? {
+            Receiver::Place(place) => Ok(place),
+            Receiver::Table(_) => Err(err(
+                expr,
+                "a constant is not the caller's to slice: it lives in the program, not the input",
+            )),
+            Receiver::Walk(_) => Err(err(expr, "a walk cannot be returned")),
+        }
+    }
+
     /// The place a field access names, which must be in the aggregate parameter.
     fn place_of(&self, field: &syn::ExprField) -> syn::Result<Place> {
         let (root, path) = field_path(field)?;
@@ -1167,6 +1333,12 @@ impl Lowerer {
 
     /// Lowers `x[i]` on a constant table or a byte region.
     fn lower_index(&mut self, index: &syn::ExprIndex, depth: u32) -> syn::Result<Scalar> {
+        if let syn::Expr::Range(range) = unparen(&index.index) {
+            return Err(err(
+                range,
+                "a slice is only a function's result: return it, or index one element",
+            ));
+        }
         match self.classify(&index.expr)? {
             Receiver::Table(table) => self.lower_table_index(&table, index, depth),
             Receiver::Place(place) => self.lower_region_index(&place, index, depth),
@@ -2002,6 +2174,56 @@ fn const_scalar(expr: &syn::Expr) -> syn::Result<Option<u64>> {
         },
         _ => None,
     })
+}
+
+/// The region and range a returned slice names.
+///
+/// A slice is borrowed and a result is owned, so the source says which
+/// conversion it means — `Bytes::from(&m.body[2..])`, `m.body[2..].to_vec()` —
+/// and the reference copy is what checks that the conversion produces the
+/// return type. The machine skips the copy: it hands back two numbers, and the
+/// caller copies out of the buffer it already owns.
+fn region_slice(expr: &syn::Expr) -> syn::Result<(&syn::Expr, Option<&syn::ExprRange>)> {
+    match unborrow(owned(expr)) {
+        syn::Expr::Index(index) => match unparen(&index.index) {
+            syn::Expr::Range(range) => Ok((&index.expr, Some(range))),
+            other => Err(err(
+                other,
+                "a returned slice needs a range: `m.body[a..b]`, or the region on its own",
+            )),
+        },
+        other => Ok((other, None)),
+    }
+}
+
+/// Looks through the conversion that owns a slice, if there is one.
+///
+/// Any one-argument call will do, and any of the `to_*` methods: which of them
+/// actually produces the return type is a question the reference copy answers,
+/// and answering it here would need the types the macro cannot see.
+fn owned(expr: &syn::Expr) -> &syn::Expr {
+    match unparen(expr) {
+        syn::Expr::Call(call) if call.args.len() == 1 => call.args.first().unwrap_or(expr),
+        syn::Expr::MethodCall(call)
+            if call.args.is_empty()
+                && matches!(
+                    call.method.to_string().as_str(),
+                    "to_vec" | "to_owned" | "to_string"
+                ) =>
+        {
+            &call.receiver
+        }
+        other => other,
+    }
+}
+
+/// The expression under any parentheses and borrows.
+fn unborrow(expr: &syn::Expr) -> &syn::Expr {
+    let mut inner = unparen(expr);
+    while let syn::Expr::Reference(reference) = inner {
+        inner = unparen(&reference.expr);
+    }
+    inner
 }
 
 /// The element of a table type: `[T; N]`, `&[T; N]`, `&[T]` or `&str`, whose
